@@ -16,9 +16,9 @@ A public collection of plugins for developer workflows. See each plugin for its 
 
 ```bash
 claude plugin marketplace add svtlv/cc-stuff
-claude plugin install code-explainer@SvetlovA-cc-stuff
-claude plugin install partner-agents@SvetlovA-cc-stuff
-claude plugin install pr-review-toolkit@SvetlovA-cc-stuff
+claude plugin install code-explainer@svtlv-cc-stuff
+claude plugin install partner-agents@svtlv-cc-stuff
+claude plugin install pr-review-toolkit@svtlv-cc-stuff
 ```
 
 Invoke skills with `/code-explainer:explain`, `/partner-agents:partner` or `/pr-review-toolkit:address-review-comments`.
@@ -27,9 +27,9 @@ Invoke skills with `/code-explainer:explain`, `/partner-agents:partner` or `/pr-
 
 ```bash
 codex plugin marketplace add svtlv/cc-stuff
-codex plugin add code-explainer@SvetlovA-cc-stuff
-codex plugin add partner-agents@SvetlovA-cc-stuff
-codex plugin add pr-review-toolkit@SvetlovA-cc-stuff
+codex plugin add code-explainer@svtlv-cc-stuff
+codex plugin add partner-agents@svtlv-cc-stuff
+codex plugin add pr-review-toolkit@svtlv-cc-stuff
 ```
 
 Invoke skills with `$explain`, `$partner` or `$address-review-comments`. Codex in the desktop app can also install from the registered marketplace through its Plugins UI. Review and trust the partner plugin's hooks in Codex before using them. See [Codex packaging](https://developers.openai.com/plugins/build/plugins) for marketplace and hook support.

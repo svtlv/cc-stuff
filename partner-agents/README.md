@@ -42,14 +42,14 @@ Or from the shell:
 
 ```bash
 claude plugin marketplace add svtlv/cc-stuff
-claude plugin install partner-agents@SvetlovA-cc-stuff
+claude plugin install partner-agents@svtlv-cc-stuff
 ```
 
 ### Codex
 
 ```bash
 codex plugin marketplace add svtlv/cc-stuff
-codex plugin add partner-agents@SvetlovA-cc-stuff
+codex plugin add partner-agents@svtlv-cc-stuff
 ```
 
 The `.codex-plugin/plugin.json` loads the shared skill and hooks. Review and trust those hooks in Codex before using them; see [the official hook documentation](https://learn.chatgpt.com/docs/hooks). The plugin requires local shell and terminal access. Copying only the skill folder omits the hook configuration, so install the whole plugin for the full workflow.

@@ -38,7 +38,7 @@ Text after the target narrows the focus. Follow-up questions in the same session
 
 ```bash
 claude plugin marketplace add svtlv/cc-stuff
-claude plugin install code-explainer@SvetlovA-cc-stuff
+claude plugin install code-explainer@svtlv-cc-stuff
 ```
 
 For a bare `/explain` command, copy the skill into your personal skills:
@@ -55,7 +55,7 @@ For local development: `claude --plugin-dir ./cc-stuff/code-explainer`.
 
 ```bash
 codex plugin marketplace add svtlv/cc-stuff
-codex plugin add code-explainer@SvetlovA-cc-stuff
+codex plugin add code-explainer@svtlv-cc-stuff
 ```
 
 For a standalone install, copy `skills/explain` into `~/.agents/skills/` (personal) or the repository's `.agents/skills/` (project). Restart the session after installing.

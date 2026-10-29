@@ -24,7 +24,7 @@ Inside Claude Code, use `/plugin install pr-review-toolkit --marketplace svtlv/c
 
 ```bash
 claude plugin marketplace add svtlv/cc-stuff
-claude plugin install pr-review-toolkit@SvetlovA-cc-stuff
+claude plugin install pr-review-toolkit@svtlv-cc-stuff
 ```
 
 For local development:
@@ -38,7 +38,7 @@ claude --plugin-dir ./cc-stuff/pr-review-toolkit
 
 ```bash
 codex plugin marketplace add svtlv/cc-stuff
-codex plugin add pr-review-toolkit@SvetlovA-cc-stuff
+codex plugin add pr-review-toolkit@svtlv-cc-stuff
 ```
 
 For local development, register the checkout with `codex plugin marketplace add ./cc-stuff`, install with the same `codex plugin add` command, and restart the session. See [Codex plugin packaging](https://developers.openai.com/plugins/build/plugins).

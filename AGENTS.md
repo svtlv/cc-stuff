@@ -32,7 +32,7 @@ Claude registry format:
 
 ```json
 {
-  "name": "SvetlovA-cc-stuff",
+  "name": "svtlv-cc-stuff",
   "owner": { "name": "svtlv" },
   "plugins": [
     {
