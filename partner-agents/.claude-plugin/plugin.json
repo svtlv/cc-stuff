@@ -3,11 +3,11 @@
   "version": "1.2.0",
   "description": "Run several AI agents (whatever agent CLIs your machine has, plus any you describe) as equal partners, each in its own terminal tab, debating every decision through a shared transcript with an exclusive write baton. Providers and models are discovered on the machine, never read off a bundled list.",
   "author": {
-    "name": "SvetlovA",
-    "url": "https://github.com/SvetlovA"
+    "name": "svtlv",
+    "url": "https://github.com/svtlv"
   },
-  "homepage": "https://github.com/SvetlovA/cc-stuff/tree/master/partner-agents",
-  "repository": "https://github.com/SvetlovA/cc-stuff",
+  "homepage": "https://github.com/svtlv/cc-stuff/tree/master/partner-agents",
+  "repository": "https://github.com/svtlv/cc-stuff",
   "license": "MIT",
   "keywords": [
     "multi-agent",

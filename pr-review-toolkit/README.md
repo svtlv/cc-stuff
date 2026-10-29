@@ -20,24 +20,24 @@ Thread resolution, replies, Orca note cleanup, commits, and pushing remain manua
 
 ### Claude Code
 
-Inside Claude Code, use `/plugin install pr-review-toolkit --marketplace SvetlovA/cc-stuff`, or run:
+Inside Claude Code, use `/plugin install pr-review-toolkit --marketplace svtlv/cc-stuff`, or run:
 
 ```bash
-claude plugin marketplace add SvetlovA/cc-stuff
+claude plugin marketplace add svtlv/cc-stuff
 claude plugin install pr-review-toolkit@SvetlovA-cc-stuff
 ```
 
 For local development:
 
 ```bash
-git clone https://github.com/SvetlovA/cc-stuff.git
+git clone https://github.com/svtlv/cc-stuff.git
 claude --plugin-dir ./cc-stuff/pr-review-toolkit
 ```
 
 ### Codex
 
 ```bash
-codex plugin marketplace add SvetlovA/cc-stuff
+codex plugin marketplace add svtlv/cc-stuff
 codex plugin add pr-review-toolkit@SvetlovA-cc-stuff
 ```
 
@@ -46,7 +46,7 @@ For local development, register the checkout with `codex plugin marketplace add 
 The plugin includes a `.codex-plugin/plugin.json` manifest pointing to the same `skills/` directory. For standalone local skill installation, clone the repository and copy all three skill folders together:
 
 ```bash
-git clone https://github.com/SvetlovA/cc-stuff.git
+git clone https://github.com/svtlv/cc-stuff.git
 mkdir -p ~/.agents/skills
 cp -R ./cc-stuff/pr-review-toolkit/skills/address-review-comments ~/.agents/skills/
 cp -R ./cc-stuff/pr-review-toolkit/skills/gh-address-review-comments ~/.agents/skills/

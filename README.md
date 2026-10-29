@@ -15,7 +15,7 @@ A public collection of plugins for developer workflows. See each plugin for its 
 ### Claude Code
 
 ```bash
-claude plugin marketplace add SvetlovA/cc-stuff
+claude plugin marketplace add svtlv/cc-stuff
 claude plugin install code-explainer@SvetlovA-cc-stuff
 claude plugin install partner-agents@SvetlovA-cc-stuff
 claude plugin install pr-review-toolkit@SvetlovA-cc-stuff
@@ -26,7 +26,7 @@ Invoke skills with `/code-explainer:explain`, `/partner-agents:partner` or `/pr-
 ### Codex
 
 ```bash
-codex plugin marketplace add SvetlovA/cc-stuff
+codex plugin marketplace add svtlv/cc-stuff
 codex plugin add code-explainer@SvetlovA-cc-stuff
 codex plugin add partner-agents@SvetlovA-cc-stuff
 codex plugin add pr-review-toolkit@SvetlovA-cc-stuff
@@ -37,7 +37,7 @@ Invoke skills with `$explain`, `$partner` or `$address-review-comments`. Codex i
 ### Local development
 
 ```bash
-git clone https://github.com/SvetlovA/cc-stuff.git
+git clone https://github.com/svtlv/cc-stuff.git
 cd cc-stuff
 claude --plugin-dir ./code-explainer --plugin-dir ./partner-agents --plugin-dir ./pr-review-toolkit
 ```

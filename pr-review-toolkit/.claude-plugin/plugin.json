@@ -3,11 +3,11 @@
   "version": "0.7.1",
   "description": "Address supplied review feedback, or fetch GitHub PR and Orca editor comments before applying code fixes. Thread resolution and pushing are left to the user.",
   "author": {
-    "name": "SvetlovA",
-    "url": "https://github.com/SvetlovA"
+    "name": "svtlv",
+    "url": "https://github.com/svtlv"
   },
-  "homepage": "https://github.com/SvetlovA/cc-stuff/tree/master/pr-review-toolkit",
-  "repository": "https://github.com/SvetlovA/cc-stuff",
+  "homepage": "https://github.com/svtlv/cc-stuff/tree/master/pr-review-toolkit",
+  "repository": "https://github.com/svtlv/cc-stuff",
   "license": "MIT",
   "keywords": [
     "github",

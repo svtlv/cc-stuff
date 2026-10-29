@@ -37,14 +37,14 @@ Text after the target narrows the focus. Follow-up questions in the same session
 ### Claude Code
 
 ```bash
-claude plugin marketplace add SvetlovA/cc-stuff
+claude plugin marketplace add svtlv/cc-stuff
 claude plugin install code-explainer@SvetlovA-cc-stuff
 ```
 
 For a bare `/explain` command, copy the skill into your personal skills:
 
 ```bash
-git clone https://github.com/SvetlovA/cc-stuff.git
+git clone https://github.com/svtlv/cc-stuff.git
 mkdir -p ~/.claude/skills
 cp -R ./cc-stuff/code-explainer/skills/explain ~/.claude/skills/
 ```
@@ -54,7 +54,7 @@ For local development: `claude --plugin-dir ./cc-stuff/code-explainer`.
 ### Codex
 
 ```bash
-codex plugin marketplace add SvetlovA/cc-stuff
+codex plugin marketplace add svtlv/cc-stuff
 codex plugin add code-explainer@SvetlovA-cc-stuff
 ```
 

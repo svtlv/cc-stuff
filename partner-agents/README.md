@@ -35,20 +35,20 @@ A partner is a **separate process** with its own provider, model, and context â€
 ### Claude Code
 
 ```text
-/plugin install partner-agents --marketplace SvetlovA/cc-stuff
+/plugin install partner-agents --marketplace svtlv/cc-stuff
 ```
 
 Or from the shell:
 
 ```bash
-claude plugin marketplace add SvetlovA/cc-stuff
+claude plugin marketplace add svtlv/cc-stuff
 claude plugin install partner-agents@SvetlovA-cc-stuff
 ```
 
 ### Codex
 
 ```bash
-codex plugin marketplace add SvetlovA/cc-stuff
+codex plugin marketplace add svtlv/cc-stuff
 codex plugin add partner-agents@SvetlovA-cc-stuff
 ```
 
@@ -57,7 +57,7 @@ The `.codex-plugin/plugin.json` loads the shared skill and hooks. Review and tru
 ### Local development
 
 ```bash
-git clone https://github.com/SvetlovA/cc-stuff.git
+git clone https://github.com/svtlv/cc-stuff.git
 claude --plugin-dir ./cc-stuff/partner-agents
 ```
 
