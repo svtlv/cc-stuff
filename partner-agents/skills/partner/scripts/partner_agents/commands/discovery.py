@@ -13,7 +13,8 @@ from ..providers.models import discover_models
 from ..providers.probe import probe_cli
 from ..providers.resolve import resolve_provider
 from ..providers.validate import validate
-from ..terminals.detect import terminal_available, terminal_choice, terminal_order
+from ..terminals.detect import (host_match, terminal_available, terminal_choice,
+                                terminal_order)
 from ..util import NL, emit
 
 
@@ -234,7 +235,8 @@ def cmd_terminals(args) -> int:
         row = {"name": name, "available": ok, "why": why,
                "label": spec.get("label") or f"{name} tab",
                "can_type": bool(spec.get("send")),
-               "source": spec.get("source", "built-in")}
+               "source": spec.get("source", "built-in"),
+               "here": host_match(spec)}
         if ok and first is None:
             first = row
         rows.append(row)
@@ -249,7 +251,8 @@ def cmd_terminals(args) -> int:
         state = "available" if r["available"] else r["why"][:32]
         typing = "can be typed into" if r["can_type"] else "cannot be typed into"
         origin = "" if r["source"] == "built-in" else f"   [{r['source']}]"
-        print(f"{mark} {r['name']:16} {state:34} {typing}{origin}")
+        here = f"   <- {r['here']}" if r["here"] else ""
+        print(f"{mark} {r['name']:16} {state:34} {typing:22}{here}{origin}")
     if first:
         print(f"{NL}A partner spawned now opens in: {first['label']}.")
         if not first["can_type"]:

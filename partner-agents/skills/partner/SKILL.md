@@ -224,7 +224,7 @@ Every idle `wait` cycle is a model turn spent deciding to wait again. So once **
 - it is not mid-turn. For this session, a prompt hook opens the turn and the Stop hook closes it, because the background `wait` keeps running while you work;
 - it has stayed like that for the full minute since `wait` last handed it anything.
 
-Nor does it pause while a tab sits in a terminal that cannot be typed into, because a message could not wake that tab.
+A tab in a terminal that cannot be typed into does not hold the pause off. Looping it until the human returns would cost a model turn every cycle, so it stops like everyone else. The pause notice names it, and when there is work the human types `continue` in its tab. When you resume the session, the resume note names that tab and the line to type: relay it to the human.
 
 So **before ending a turn, finish everything**: answer every message to you, complete and report the change, and check what you said you would check. Ending the turn is your declaration that you are done.
 

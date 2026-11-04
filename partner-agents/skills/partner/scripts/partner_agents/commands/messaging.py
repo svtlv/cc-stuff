@@ -12,7 +12,7 @@ from pathlib import Path
 
 from ..idle import (
     break_idle, idle_verdict, is_pause_notice, mark_active, note_idle, pause_banner,
-    pause_session, resume_note,
+    pause_session, resume_note, wakeable,
 )
 from ..presence import marker_live, read_marker, touch_seen, write_marker
 from ..prompts import EXPLORE_BRIEF, OPENING
@@ -57,6 +57,7 @@ def cmd_wait(args) -> int:
     # Only an agent that cannot be typed awake keeps a wait through a pause --
     # see sleeps_through_pause. Everyone else stops, whoever started the session.
     sleeper = sleeps_through_pause(roster, who)
+    manual = not sleeper and not wakeable(roster, who)
     next_idle = 0.0              # check for an idle session at once
     announced = False            # a sleeper says once that it is sleeping
     # Say what this command is doing *before* blocking, and flush it. Every CLI
@@ -172,7 +173,7 @@ def cmd_wait(args) -> int:
             paused = read_pause(sd)
             if paused and not sleeper:
                 emit(args, {"messages": [], "paused": paused},
-                     pause_banner(paused, sleeper=False))
+                     pause_banner(paused, sleeper=False, manual=manual))
                 return 0
             if not paused and time.time() >= next_idle:
                 next_idle = time.time() + IDLE_CHECK
@@ -444,7 +445,8 @@ def cmd_read(args) -> int:
     paused = read_pause(sd)
     sleeper = sleeps_through_pause(roster, who)
     if paused and not (sleeper and not marker_live(mine)):
-        listening = NL * 2 + pause_banner(paused, sleeper)
+        listening = NL * 2 + pause_banner(
+            paused, sleeper, manual=not sleeper and not wakeable(roster, who))
     elif marker_live(mine):
         left = max(0, int((mine.get("deadline") or 0) - time.time()))
         listening = (f"{NL * 2}[a `wait` is already in flight for you "

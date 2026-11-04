@@ -6,9 +6,9 @@ every 90s through a lunch break is most of the bill for the session, and none
 of it buys anything. So once every agent has finished its work, the session
 pauses: every agent ends its turn instead of re-arming `wait` -- the one
 that started the session exactly like the ones it spawned -- and the first
-message to any of them types a wake-up into every tab. Only an agent whose tab
-cannot be typed into keeps its background `wait`, sleeping without returning:
-a process polling a file costs nothing, a model turn does.
+message to any of them types a wake-up into every tab. Only a session agent
+whose tab cannot be typed into keeps its background `wait`, sleeping without
+returning: a process polling a file costs nothing, a model turn does.
 
 "Finished" has to be proven per agent, because pausing an agent mid-work
 drops whatever it was about to say. Going back to `wait` is how an agent
@@ -18,8 +18,10 @@ continuous IDLE_PAUSE in `wait` since the last time `wait` handed it work.
 
 Resuming needs nobody: the first message to any agent -- `send`, `kickoff`,
 `claim`, `spawn`, or the human writing to a Claude agent -- lifts the pause
-and types a wake-up into every tab. That is also why a session never pauses
-while a tab agent sits in a terminal that cannot be typed into.
+and types a wake-up into every tab. A tab agent in a terminal that cannot be
+typed into does not hold the pause off: looping it until the human returns
+costs a model turn every cycle, so it stops like everyone else and is woken by
+hand. The pause notice names it, and the resume reports the exact line to type.
 """
 from __future__ import annotations
 
@@ -119,17 +121,31 @@ def idle_verdict(sd: Path, roster: dict) -> tuple[bool, str]:
             for why in [agent_busy(sd, roster, p)] if why]
     if busy:
         return False, "; ".join(busy)
-    # Checked last: it is the only expensive question, and a pause that strands
-    # a tab nobody can wake saves tokens by losing the partner.
-    stuck = [p for p in running if not wakeable(roster, p)]
+    why = f"every agent finished its work and stayed idle for {limit}s"
+    # Checked last: it is the only expensive question. A tab nobody can type
+    # into does not stop the pause -- looping it until the human is back is
+    # exactly the cost a pause exists to cut -- but it is named, because that
+    # agent comes back only when somebody types into its tab.
+    stuck = by_hand(roster)
     if stuck:
-        return False, (f"{', '.join(stuck)} could not be woken again by a "
-                       f"message, so the loops keep running")
-    return True, f"every agent finished its work and stayed idle for {limit}s"
+        why += (f"; {', '.join(stuck)} cannot be woken by a message -- when "
+                f"there is work, type `continue` in its tab")
+    return True, why
 
 
-def pause_banner(paused: dict, sleeper: bool) -> str:
+def by_hand(roster: dict) -> list[str]:
+    """Running agents that only the human can bring back from a pause."""
+    return [p for p, e in roster.get("partners", {}).items()
+            if e.get("status") == "running" and not wakeable(roster, p)]
+
+
+def pause_banner(paused: dict, sleeper: bool, manual: bool = False) -> str:
     since = paused.get("since", "?")
+    if manual:
+        return (f"[session paused since {since}: every agent finished. Do NOT run "
+                f"`wait` again -- end your turn now. Your tab cannot be typed "
+                f"into, so no message will wake you: the human types `continue` "
+                f"here when there is work. Then `read` and go back to `wait`.]")
     if sleeper:
         return (f"[session paused since {since}: every agent finished. Your tab "
                 f"cannot be typed into, so this background `wait` is sleeping "

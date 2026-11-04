@@ -358,6 +358,9 @@ stop spending a model turn every cycle re-arming `wait`.
 - **Only if your `wait` says it is sleeping** (your tab cannot be typed into):
   keep that one background `wait` armed. It does not return while paused, so it
   costs nothing.
+- **An agent named above as "cannot be woken by a message"** stops too, and
+  stays stopped until the human types `continue` in its tab. Whoever resumes
+  the session relays that to the human -- the resume names the tab and the line.
 
 Nothing needs doing to resume: the first message to any agent -- `send`,
 `kickoff`, `claim`, `spawn`, or the human writing to one of us -- wakes everyone.

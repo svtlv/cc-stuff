@@ -41,6 +41,14 @@ TERMINAL_FILES = [
     Path.home() / ".partner" / "terminals.json",
 ]
 
+# Detection keys, strongest first (see terminal_order):
+#   env    -- set only inside this host; also gates availability, because the
+#             host's CLI cannot open a tab from anywhere else (tmux, kitty @).
+#   host   -- set by this app for everything it runs; ranks only.
+#   term   -- matched against TERM_PROGRAM / TERM; ranks only.
+#   bundle -- macOS bundle id matched against __CFBundleIdentifier, which
+#             LaunchServices sets for every process an app starts. It catches
+#             GUI hosts that set nothing else (an Orca chat session); ranks only.
 TERMINALS: dict[str, dict] = {
     # Orca manages its own tabs: inside it, a detached OS terminal would strand
     # the partner outside the workspace the user is looking at. Its env markers
@@ -54,6 +62,7 @@ TERMINALS: dict[str, dict] = {
                 "ORCA_AGENT_SESSION_ID"],
         "bin": "orca",
         "bin_env": ["ORCA_CLI_COMMAND", "ORCA_CODEX_LAUNCH_PREFLIGHT"],
+        "bundle": ["com.stablyai.orca"],
         "open": "{bin} terminal create --worktree path:{cwd} --title {title} "
                 "--command {shell} --json",
         "handle": "json:result.terminal.handle",
@@ -76,7 +85,8 @@ TERMINALS: dict[str, dict] = {
         "label": "zellij pane",
     },
     "wezterm": {
-        "bin": "wezterm",
+        "bin": "wezterm", "host": ["WEZTERM_PANE"], "term": ["wezterm"],
+        "bundle": ["com.github.wez.wezterm"],
         "open": "{bin} cli spawn --cwd {cwd} -- bash {run}",
         "handle": "stdout",
         "send": "{bin} cli send-text --pane-id {handle} --no-paste {text_nl}",
@@ -87,6 +97,8 @@ TERMINALS: dict[str, dict] = {
     },
     "kitty": {
         "env": ["KITTY_LISTEN_ON"], "bin": "kitty",
+        "host": ["KITTY_WINDOW_ID"], "term": ["kitty"],
+        "bundle": ["net.kovidgoyal.kitty"],
         "open": "{bin} @ launch --type=tab --tab-title {title} --cwd {cwd} "
                 "bash {run}",
         "send": "{bin} @ send-text --match title:{title} {text_nl}",
@@ -94,6 +106,7 @@ TERMINALS: dict[str, dict] = {
     },
     "ghostty": {
         "bin": "ghostty", "term": ["ghostty", "xterm-ghostty"],
+        "host": ["GHOSTTY_RESOURCES_DIR"], "bundle": ["com.mitchellh.ghostty"],
         "open": "{bin} +new-window -e bash {run}",
         "label": "Ghostty window",
     },
@@ -109,6 +122,7 @@ TERMINALS: dict[str, dict] = {
     },
     "wt": {
         "platform": "nt", "bin": "wt.exe", "term": ["Windows Terminal"],
+        "host": ["WT_SESSION"],
         "open": "{bin} -w 0 nt --title {title} -d {cwd} cmd.exe /k {run}",
         "label": "Windows Terminal tab",
     },
@@ -120,23 +134,27 @@ TERMINALS: dict[str, dict] = {
     "iterm": {
         "platform": "darwin", "bin": "osascript",
         "path": "/Applications/iTerm.app",
+        "host": ["ITERM_SESSION_ID"], "term": ["iterm"],
+        "bundle": ["com.googlecode.iterm2"],
         "open": '{bin} -e tell application "iTerm2" to tell current window to '
                 'create tab with default profile command "bash {run}"',
         "label": "iTerm2 tab",
     },
     "apple-terminal": {
         "platform": "darwin", "bin": "osascript",
+        "term": ["apple_terminal"], "bundle": ["com.apple.Terminal"],
         "open": '{bin} -e tell application "Terminal" to do script "bash {run}" '
                 '-e tell application "Terminal" to activate',
         "label": "Terminal.app tab",
     },
     "gnome-terminal": {
         "bin": "gnome-terminal",
+        "host": ["GNOME_TERMINAL_SCREEN", "GNOME_TERMINAL_SERVICE"],
         "open": "{bin} --tab --title={title} -- bash {run}",
         "label": "GNOME Terminal tab",
     },
     "konsole": {
-        "bin": "konsole", "open": "{bin} --new-tab -e bash {run}",
+        "bin": "konsole", "host": ["KONSOLE_VERSION"], "open": "{bin} --new-tab -e bash {run}",
         "label": "Konsole tab",
     },
     "xfce4-terminal": {
@@ -145,11 +163,12 @@ TERMINALS: dict[str, dict] = {
         "label": "Xfce Terminal tab",
     },
     "terminator": {
-        "bin": "terminator", "open": "{bin} -e {shell}",
+        "bin": "terminator", "host": ["TERMINATOR_UUID"], "open": "{bin} -e {shell}",
         "label": "Terminator window",
     },
     "alacritty": {
-        "bin": "alacritty", "open": "{bin} -e bash {run}",
+        "bin": "alacritty", "host": ["ALACRITTY_WINDOW_ID", "ALACRITTY_SOCKET"],
+        "term": ["alacritty"], "bundle": ["org.alacritty"], "open": "{bin} -e bash {run}",
         "label": "Alacritty window",
     },
     "xterm": {

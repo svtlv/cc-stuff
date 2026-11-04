@@ -354,7 +354,7 @@ Details that keep it from getting in the way:
 - **The baton holder is exempt from check 1.** It drives the change; it is not waiting on anyone. `pending_for` returns nothing for it. Check 2 still applies — driving is not an excuse for going deaf.
 - **Own messages never count** — an agent cannot owe itself a reply (`m["from"] != who`).
 - **It nags at a bounded rate.** `.partner/<id>/.stop-nag` holds the transcript size at the last message block — an identical size means "already told them". `.stop-nag-live` throttles the listener warning to once every 120s, since that one is not tied to a new message. A genuinely stuck agent is never wedged in an unbreakable loop.
-- **A pause lets every agent go.** While `paused.json` exists, check 2 does not apply, since leaving the loop is what a pause asks of it. Only an agent that sleeps through the pause (a session agent whose tab cannot be typed into) is still held to its background `wait`, which costs nothing.
+- **A pause lets every agent go.** While `paused.json` exists, check 2 does not apply, since leaving the loop is what a pause asks of it. Only an agent that sleeps through the pause (a session agent whose tab cannot be typed into) is still held to its background `wait`, which costs nothing. A *tab* agent whose tab cannot be typed into stops like the rest and does not hold the pause off; the pause notice names it, and only the human typing `continue` in its tab brings it back.
 - **It fails open.** No Python, no `.partner/`, or an unregistered/stopped agent — the stop proceeds.
 - **Identity** comes from `PARTNER_ID`, which `run.sh`/`run.cmd` export into the tab, so the hook resolves the same agent the wrappers do rather than assuming it is the session.
 

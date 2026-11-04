@@ -265,9 +265,38 @@ def terminal_available(spec: dict) -> tuple[bool, str]:
     return True, "available"
 
 
+def host_match(spec: dict) -> str:
+    """How this entry is the app the session was started from, or "".
+
+    "inside" -- one of its gating `env` markers is set; "same app" -- one of its
+    `host` markers is set or TERM_PROGRAM/TERM names it; "same app (bundle)" --
+    the macOS bundle id that launched this process is its own.
+    """
+    if any(os.environ.get(e) for e in (spec.get("env") or [])):
+        return "inside"
+    if any(os.environ.get(e) for e in (spec.get("host") or [])):
+        return "same app"
+    here = " ".join(os.environ.get(k, "") for k in
+                    ("TERM_PROGRAM", "TERM", "TERMINAL_EMULATOR")).lower()
+    if any(h.lower() in here for h in (spec.get("term") or [])):
+        return "same app"
+    bundle = os.environ.get("__CFBundleIdentifier", "").lower()
+    if bundle and bundle in (b.lower() for b in (spec.get("bundle") or [])):
+        return "same app (bundle)"
+    return ""
+
+
+_HOST_RANK = {"inside": 0, "same app": 1, "same app (bundle)": 2, "": 3}
+
+
 def terminal_order(prefer: str | None = None,
                    discover: bool = False) -> list[tuple[str, dict]]:
     """Entries in the order they should be tried.
+
+    The rule is "open the partner in the app the session was started from, in
+    another tab, when that app can do it; otherwise anything that can open a
+    window". So the app we are in ranks ahead of every other installed
+    terminal, and `open_tab` falls through to the next entry when it fails.
 
     `prefer` -- `--terminal <name>`, or PARTNER_TERMINAL -- moves one to the
     front. Nothing is removed by it: a preference that turns out not to be
@@ -275,17 +304,13 @@ def terminal_order(prefer: str | None = None,
     """
     specs = load_terminals(discover)
     want = prefer or os.environ.get("PARTNER_TERMINAL") or ""
-    here = " ".join(os.environ.get(k, "") for k in
-                    ("TERM_PROGRAM", "TERM", "TERMINAL_EMULATOR")).lower()
 
-    def rank(item: tuple[str, dict]) -> tuple[int, int, int]:
+    def rank(item: tuple[str, dict]) -> tuple[int, int]:
         name, spec = item
-        inside = any(os.environ.get(e) for e in (spec.get("env") or []))
-        looks = any(h.lower() in here for h in (spec.get("term") or []))
-        # Asked for > a host we are inside > the terminal on screen > the table.
-        return (0 if name == want else 1,
-                0 if inside else 1,
-                0 if looks else 1)
+        # Asked for > a host we are inside > the app we were started from
+        # (its own markers or the terminal on screen, then the macOS bundle
+        # id) > the table.
+        return (0 if name == want else 1, _HOST_RANK[host_match(spec)])
 
     # Stable, so the table order breaks every tie.
     return sorted(specs.items(), key=rank)

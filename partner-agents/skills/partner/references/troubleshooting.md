@@ -44,7 +44,7 @@
 - `mid-turn`: a host turn that has not ended, which goes stale after 30 min;
 - `finished Ns ago`: it keeps being handed something.
 
-If `idle` says a tab `could not be woken`, it runs in a terminal that cannot be typed into (`terminals` says which), and pausing it would strand it. That is deliberate.
+A tab in a terminal that cannot be typed into (`terminals` says which) no longer keeps the session cycling. Before 1.3.0 it did, which cost that tab a model turn every `wait` cycle until the human came back. Now the session pauses anyway, the pause notice names that tab as `cannot be woken by a message`, and the resume prints the line to type into it (`continue`) or the runner to restart. If idle partners still cycle with nothing else named, the installed plugin is older than 1.3.0.
 
 **The session pauses and resumes itself within seconds ("p1 was written to by the human").** This was fixed in 0.20.2. Before that, the Claude Code session's background `wait` returned on the pause notice. The `<task-notification>` that re-invoked the model then passed through the prompt hook as a human message and lifted the pause. Now the session's `wait` sleeps through the notice, and the prompt hook ignores task notifications. If it still happens, the installed plugin is older than 0.20.2.
 

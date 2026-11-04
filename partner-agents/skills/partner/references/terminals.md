@@ -65,7 +65,9 @@ Detection is per entry, not a chain of ifs in code:
 |-----|---------|
 | `bin` | binary that must be on PATH (defaults to the first word of `open`) |
 | `bin_env` | env var (or list of them, first existing path wins) holding a path to the binary, when a host does not put it on PATH |
-| `env` | any one of these env vars set → we are running **inside** this terminal |
+| `env` | any one of these env vars set → we are running **inside** this terminal. It also gates availability: an entry with `env` is skipped when none is set, because its CLI cannot open a tab from outside (tmux, kitty `@`) |
+| `host` | env vars this app sets for everything it runs (`ITERM_SESSION_ID`, `WEZTERM_PANE`, `GNOME_TERMINAL_SCREEN`) → the session was started from this app. Ranks only, never gates |
+| `bundle` | macOS bundle ids matched against `__CFBundleIdentifier`, which LaunchServices sets for every process an app starts. It catches GUI hosts that set nothing else, such as an Orca chat session. Ranks only |
 | `path` | a path that must exist (an app bundle, say) |
 | `platform` | `nt`, `darwin`, `linux` |
 | `term` | strings matched against `$TERM` / `$TERM_PROGRAM` → this is the terminal on screen |
@@ -74,11 +76,14 @@ Detection is per entry, not a chain of ifs in code:
 
 ## Selection order
 
+The rule: **open the partner in another tab of the app the session was started from, when that app can do it; otherwise in any terminal that can open a window.** The ranking below puts that app ahead of every other installed terminal, and `spawn` falls through to the next entry whenever opening a tab fails.
+
 1. **`--terminal <name>`**, or `PARTNER_TERMINAL` — an explicit choice comes first. It is a preference, not a constraint: if that terminal turns out to be unusable, detection continues rather than failing the spawn.
    Discovery takes part in this ordering rather than acting as a fallback after it, because a user sitting in an unrecognised terminal should get the partner beside them, not in whichever other terminal happens to be installed.
 2. **A host we are already inside** (`env` matched) — a multiplexer or a workspace app. A tab inside the window the user already has costs nothing, and inside a workspace app a detached OS window would strand the partner outside the workspace they are looking at.
-3. **The terminal on screen** (`term` matched) — the partner appears where the user is actually looking.
-4. **The table order** — terminals with a control CLI first, since those are also the ones that can be typed into; then whatever else can open a window.
+3. **The app the session was started from** — one of its `host` markers is set, or `TERM_PROGRAM`/`TERM` names it (`term`). The partner appears where the user is actually looking.
+4. **The macOS bundle id** (`bundle`) — weaker than the above, since a process inherits it from whatever app launched its ancestors.
+5. **The table order** — terminals with a control CLI first, since those are also the ones that can be typed into; then whatever else can open a window.
 
 Built-in entries, in table order: `orca`, `tmux`, `zellij`, `wezterm`, `kitty`, `ghostty`, `foot`, `rio`, `wt`, `cmd`, `iterm`, `apple-terminal`, `gnome-terminal`, `konsole`, `xfce4-terminal`, `terminator`, `alacritty`, `xterm`, then the platform defaults `x-terminal-emulator`, `xdg-terminal-exec` and `macos-open`. Any of them can be corrected or replaced by a user entry of the same name — which is the intended fix when a terminal changes its flags, rather than waiting for this plugin to catch up.
 
