@@ -237,9 +237,11 @@ def terminal_bin(spec: dict) -> str | None:
             return found
     # Some hosts point at their own binary through the environment rather than
     # putting it on an agent's PATH.
-    alt = os.environ.get(spec.get("bin_env") or "", "")
-    if alt and Path(alt).exists():
-        return alt
+    names = spec.get("bin_env") or []
+    for var in [names] if isinstance(names, str) else names:
+        alt = os.environ.get(var, "")
+        if alt and Path(alt).exists():
+            return alt
     return None
 
 

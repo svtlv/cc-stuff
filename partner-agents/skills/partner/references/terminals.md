@@ -64,7 +64,7 @@ Detection is per entry, not a chain of ifs in code:
 | Key | Meaning |
 |-----|---------|
 | `bin` | binary that must be on PATH (defaults to the first word of `open`) |
-| `bin_env` | env var holding a path to the binary, when a host does not put it on PATH |
+| `bin_env` | env var (or list of them, first existing path wins) holding a path to the binary, when a host does not put it on PATH |
 | `env` | any one of these env vars set → we are running **inside** this terminal |
 | `path` | a path that must exist (an app bundle, say) |
 | `platform` | `nt`, `darwin`, `linux` |

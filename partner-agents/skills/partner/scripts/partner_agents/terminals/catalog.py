@@ -45,10 +45,15 @@ TERMINALS: dict[str, dict] = {
     # Orca manages its own tabs: inside it, a detached OS terminal would strand
     # the partner outside the workspace the user is looking at. Its env markers
     # are set for processes it launches, so they double as the detection.
+    # Orca terminal tabs set the worktree/tab markers; Orca chat sessions set
+    # none of them, only ORCA_AGENT_SESSION_ID and ORCA_CLI_COMMAND, so those
+    # count too -- otherwise a chat session falls through to a detached OS
+    # terminal. A chat session has no tab of its own, so self_handle stays unset.
     "orca": {
-        "env": ["ORCA_WORKTREE_ID", "ORCA_TERMINAL_HANDLE", "ORCA_TAB_ID"],
+        "env": ["ORCA_WORKTREE_ID", "ORCA_TERMINAL_HANDLE", "ORCA_TAB_ID",
+                "ORCA_AGENT_SESSION_ID"],
         "bin": "orca",
-        "bin_env": "ORCA_CODEX_LAUNCH_PREFLIGHT",
+        "bin_env": ["ORCA_CLI_COMMAND", "ORCA_CODEX_LAUNCH_PREFLIGHT"],
         "open": "{bin} terminal create --worktree path:{cwd} --title {title} "
                 "--command {shell} --json",
         "handle": "json:result.terminal.handle",
