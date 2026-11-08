@@ -7,7 +7,7 @@
     {
       "name": "code-explainer",
       "source": "./code-explainer",
-      "description": "Explain a file, plan, diff, branch, PR, module or whole project in plain language with ASCII diagrams, notes, tables and file:line links"
+      "description": "Explain code and plans with diagrams and tables, or summarize files, folders, designs, text and chats in short bullets linked to source details"
     },
     {
       "name": "partner-agents",

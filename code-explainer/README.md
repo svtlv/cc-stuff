@@ -1,6 +1,11 @@
 # code-explainer
 
-One skill, `explain`, for **Claude Code and Codex**. It explains a file, a plan, your uncommitted changes, a branch, a pull request, a module, the whole project, or a question about the code. The answer is built to be understood on the first read:
+Two read-only skills for **Claude Code, Codex and other agents that load `SKILL.md`**:
+
+- **`summarize`** turns plans, designs, code files, folders, supplied text, links and chat context into short, understandable bullets linked to the original details. With no target, it asks what to summarize and suggests choices from the current context.
+- **`explain`** gives a detailed walkthrough of a file, plan, uncommitted changes, branch, pull request, module, whole project, or question about code.
+
+The detailed `explain` answer uses:
 
 - the core idea first, in one or two plain sentences
 - ASCII diagrams of flows, loops and timelines, each followed by a short **Note:** in plain words
@@ -8,9 +13,34 @@ One skill, `explain`, for **Claude Code and Codex**. It explains a file, a plan,
 - clickable `file:line` links to the exact code behind every claim
 - only the important parts, with open or unverified items called out honestly
 
-The skill only reads. It never edits, commits or publishes anything.
+Both skills only read. They never edit, commit or publish anything.
 
 ## Usage
+
+### Short summaries
+
+| You type | It summarizes |
+|---|---|
+| `/summarize` | asks what to summarize and suggests relevant choices |
+| `/summarize docs/plans/playback.md` | the goal, major work, constraints and verification in a plan |
+| `/summarize docs/design/` | the main ideas across the folder's design documents |
+| `/summarize src/player.js` | the file's purpose and important behavior |
+| `/summarize src/player/` | the main responsibilities and behavior across code files |
+| `/summarize chat` | goals, decisions, completed work, open questions and next steps in this chat |
+| `/summarize <pasted text or URL>` | the supplied material's main points and qualifications |
+
+Each bullet starts with a bold phrase linked to the relevant source section or
+code location. Text and chat without usable links get the same concise bullets
+without invented links. Future work, verified results and unresolved questions
+remain clearly distinguished.
+
+**Claude Code:** `/code-explainer:summarize [target] [focus]`, or bare `/summarize` as a personal skill.
+
+**Codex:** `$summarize [target] [focus]`
+
+**Other agents:** load `skills/summarize/SKILL.md` using the host's skill mechanism or provide its contents as instructions. Tool names and link syntax adapt to the host; plugin installation support depends on that host.
+
+### Detailed explanations
 
 | You type | It explains |
 |---|---|
@@ -41,12 +71,13 @@ claude plugin marketplace add svtlv/cc-stuff
 claude plugin install code-explainer@svtlv-cc-stuff
 ```
 
-For a bare `/explain` command, copy the skill into your personal skills:
+For bare `/explain` and `/summarize` commands, copy the skills into your personal skills:
 
 ```bash
 git clone https://github.com/svtlv/cc-stuff.git
 mkdir -p ~/.claude/skills
 cp -R ./cc-stuff/code-explainer/skills/explain ~/.claude/skills/
+cp -R ./cc-stuff/code-explainer/skills/summarize ~/.claude/skills/
 ```
 
 For local development: `claude --plugin-dir ./cc-stuff/code-explainer`.
@@ -58,19 +89,25 @@ codex plugin marketplace add svtlv/cc-stuff
 codex plugin add code-explainer@svtlv-cc-stuff
 ```
 
-For a standalone install, copy `skills/explain` into `~/.agents/skills/` (personal) or the repository's `.agents/skills/` (project). Restart the session after installing.
+For a standalone install, copy either or both of `skills/explain` and `skills/summarize` into `~/.agents/skills/` (personal) or the repository's `.agents/skills/` (project). Restart the session after installing.
 
 ## Layout
 
 ```
-skills/explain/
-├── SKILL.md              # resolve the target → gather → write → follow-ups
-└── references/
-    ├── style.md          # the style guide and diagram templates
-    ├── targets.md        # gather commands and section outlines for each mode
-    └── example.md        # a finished answer at the expected quality
+skills/
+├── summarize/
+│   └── SKILL.md          # select input → read → short bullets with verified links
+└── explain/
+    ├── SKILL.md          # resolve the target → gather → write → follow-ups
+    └── references/
+        ├── style.md      # the style guide and diagram templates
+        ├── targets.md    # gather commands and section outlines for each mode
+        └── example.md    # a finished answer at the expected quality
 ```
 
 ## Requirements
 
-`git`. For pull requests, an authenticated [`gh`](https://cli.github.com/). Without it, the skill offers to explain the local branch instead.
+No extra tools for summarizing supplied text or chat. File/folder summaries need
+the host's file-reading tools; URLs need a supported reader. Repository comparison
+explanations need `git`. For pull requests, use an authenticated
+[`gh`](https://cli.github.com/); without it, `explain` offers the local branch instead.

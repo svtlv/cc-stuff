@@ -6,7 +6,7 @@ A public collection of plugins for developer workflows. See each plugin for its 
 
 | Plugin | Description | Version |
 |--------|-------------|---------|
-| [code-explainer](./code-explainer/) | Explain a file, plan, diff, branch, PR, module or whole project with ASCII diagrams, notes, tables and `file:line` links | 0.1.0 |
+| [code-explainer](./code-explainer/) | Explain code and plans with diagrams and tables, or summarize files, folders, designs, text and chats in short linked bullets | 0.2.0 |
 | [partner-agents](./partner-agents/) | Run AI agents as equal partners in their own terminal tabs (Orca-aware), debating every decision with you, with an exclusive write baton | 1.1.0 |
 | [pr-review-toolkit](./pr-review-toolkit/) | Address supplied review feedback or fetch GitHub PR and Orca editor comments in Claude Code and Codex | 0.7.1 |
 
@@ -21,7 +21,7 @@ claude plugin install partner-agents@svtlv-cc-stuff
 claude plugin install pr-review-toolkit@svtlv-cc-stuff
 ```
 
-Invoke skills with `/code-explainer:explain`, `/partner-agents:partner` or `/pr-review-toolkit:address-review-comments`.
+Invoke skills with `/code-explainer:explain`, `/code-explainer:summarize`, `/partner-agents:partner` or `/pr-review-toolkit:address-review-comments`.
 
 ### Codex
 
@@ -32,7 +32,7 @@ codex plugin add partner-agents@svtlv-cc-stuff
 codex plugin add pr-review-toolkit@svtlv-cc-stuff
 ```
 
-Invoke skills with `$explain`, `$partner` or `$address-review-comments`. Codex in the desktop app can also install from the registered marketplace through its Plugins UI. Review and trust the partner plugin's hooks in Codex before using them. See [Codex packaging](https://developers.openai.com/plugins/build/plugins) for marketplace and hook support.
+Invoke skills with `$explain`, `$summarize`, `$partner` or `$address-review-comments`. Codex in the desktop app can also install from the registered marketplace through its Plugins UI. Review and trust the partner plugin's hooks in Codex before using them. See [Codex packaging](https://developers.openai.com/plugins/build/plugins) for marketplace and hook support.
 
 ### Local development
 
@@ -50,7 +50,9 @@ Both hosts use the same skills and scripts. Claude reads `.claude-plugin/marketp
 
 ### [code-explainer](./code-explainer/)
 
-Explains code so it is understood on the first read. Give it a file, a plan, `changes`, `branch`, a PR number, a commit, a directory, `project` or a question; with no argument it explains the conversation's subject or asks what to explain:
+Includes `explain` for detailed walkthroughs and `summarize` for short bullet lists linked to source details. Summarize accepts plans, designs, code files, folders, text, links and chat context; without a target it asks what to summarize and suggests choices from the context.
+
+For a detailed explanation, give `explain` a file, a plan, `changes`, `branch`, a PR number, a commit, a directory, `project` or a question; with no argument it explains the conversation's subject or asks what to explain:
 
 - The core idea first, then the big-picture diagram, then one section per important part
 - ASCII diagrams of flows, loops and timelines, each followed by a plain-language **Note:**
@@ -62,7 +64,9 @@ Explains code so it is understood on the first read. Give it a file, a plan, `ch
 
 **Codex:** `$explain [target] [focus]`
 
-**Requires:** `git`; an authenticated `gh` for pull requests
+**Summaries:** `/code-explainer:summarize [target] [focus]` in Claude Code, `$summarize [target] [focus]` in Codex, or `/summarize` as a personal Claude skill. The shared instructions also work in other agents that can load `SKILL.md`.
+
+**Requires:** no extra tools for supplied text or chat summaries; `git` for repository comparisons and an authenticated `gh` for pull request explanations
 
 ---
 
