@@ -1,7 +1,7 @@
 {
   "name": "code-explainer",
-  "version": "0.2.0",
-  "description": "Explain code and plans with diagrams and tables, or summarize files, folders, designs, text and chats as short, plain-language bullets with links to source details.",
+  "version": "0.3.0",
+  "description": "Explain code and plans with diagrams and tables, summarize files, folders, designs, text and chats as short, plain-language bullets with links to source details, or combine both in one summary-then-explanation report.",
   "author": {
     "name": "svtlv",
     "url": "https://github.com/svtlv"

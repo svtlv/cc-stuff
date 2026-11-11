@@ -6,7 +6,7 @@ A public collection of plugins for developer workflows. See each plugin for its 
 
 | Plugin | Description | Version |
 |--------|-------------|---------|
-| [code-explainer](./code-explainer/) | Explain code and plans with diagrams and tables, or summarize files, folders, designs, text and chats in short linked bullets | 0.2.0 |
+| [code-explainer](./code-explainer/) | Explain code and plans with diagrams and tables, summarize files, folders, designs, text and chats in short linked bullets, or combine both in one report | 0.3.0 |
 | [partner-agents](./partner-agents/) | Run AI agents as equal partners in their own terminal tabs (Orca-aware), debating every decision with you, with an exclusive write baton | 1.1.0 |
 | [pr-review-toolkit](./pr-review-toolkit/) | Address supplied review feedback or fetch GitHub PR and Orca editor comments in Claude Code and Codex | 0.7.1 |
 
@@ -21,7 +21,7 @@ claude plugin install partner-agents@svtlv-cc-stuff
 claude plugin install pr-review-toolkit@svtlv-cc-stuff
 ```
 
-Invoke skills with `/code-explainer:explain`, `/code-explainer:summarize`, `/partner-agents:partner` or `/pr-review-toolkit:address-review-comments`.
+Invoke skills with `/code-explainer:explain`, `/code-explainer:summarize`, `/code-explainer:explain-summarize`, `/partner-agents:partner` or `/pr-review-toolkit:address-review-comments`.
 
 ### Codex
 
@@ -32,7 +32,7 @@ codex plugin add partner-agents@svtlv-cc-stuff
 codex plugin add pr-review-toolkit@svtlv-cc-stuff
 ```
 
-Invoke skills with `$explain`, `$summarize`, `$partner` or `$address-review-comments`. Codex in the desktop app can also install from the registered marketplace through its Plugins UI. Review and trust the partner plugin's hooks in Codex before using them. See [Codex packaging](https://developers.openai.com/plugins/build/plugins) for marketplace and hook support.
+Invoke skills with `$explain`, `$summarize`, `$explain-summarize`, `$partner` or `$address-review-comments`. Codex in the desktop app can also install from the registered marketplace through its Plugins UI. Review and trust the partner plugin's hooks in Codex before using them. See [Codex packaging](https://developers.openai.com/plugins/build/plugins) for marketplace and hook support.
 
 ### Local development
 
@@ -50,7 +50,7 @@ Both hosts use the same skills and scripts. Claude reads `.claude-plugin/marketp
 
 ### [code-explainer](./code-explainer/)
 
-Includes `explain` for detailed walkthroughs and `summarize` for short bullet lists linked to source details. Summarize accepts plans, designs, code files, folders, text, links and chat context; without a target it asks what to summarize and suggests choices from the context.
+Includes `explain` for detailed walkthroughs, `summarize` for short bullet lists linked to source details, and `explain-summarize` for one report with a summary first and an explanation after it. Summarize accepts plans, designs, code files, folders, text, links and chat context; without a target it asks what to summarize and suggests choices from the context.
 
 For a detailed explanation, give `explain` a file, a plan, `changes`, `branch`, a PR number, a commit, a directory, `project` or a question; with no argument it explains the conversation's subject or asks what to explain:
 
@@ -65,6 +65,8 @@ For a detailed explanation, give `explain` a file, a plan, `changes`, `branch`, 
 **Codex:** `$explain [target] [focus]`
 
 **Summaries:** `/code-explainer:summarize [target] [focus]` in Claude Code, `$summarize [target] [focus]` in Codex, or `/summarize` as a personal Claude skill. The shared instructions also work in other agents that can load `SKILL.md`.
+
+**Summary plus explanation:** `/code-explainer:explain-summarize [target] [focus]` in Claude Code, `$explain-summarize [target] [focus]` in Codex, or any agent that loads `SKILL.md`. It reuses the `summarize` and `explain` instructions, so install all three skills together.
 
 **Requires:** no extra tools for supplied text or chat summaries; `git` for repository comparisons and an authenticated `gh` for pull request explanations
 

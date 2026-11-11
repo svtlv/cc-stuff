@@ -1,9 +1,10 @@
 # code-explainer
 
-Two read-only skills for **Claude Code, Codex and other agents that load `SKILL.md`**:
+Three read-only skills for **Claude Code, Codex and other agents that load `SKILL.md`**:
 
 - **`summarize`** turns plans, designs, code files, folders, supplied text, links and chat context into short, understandable bullets linked to the original details. With no target, it asks what to summarize and suggests choices from the current context.
 - **`explain`** gives a detailed walkthrough of a file, plan, uncommitted changes, branch, pull request, module, whole project, or question about code.
+- **`explain-summarize`** combines the two in one report: a `## Summary` of linked bullets from `summarize`, then an `## Explanation` in the `explain` style. It loads the other two skills' instructions instead of copying them.
 
 The detailed `explain` answer uses:
 
@@ -13,7 +14,7 @@ The detailed `explain` answer uses:
 - clickable `file:line` links to the exact code behind every claim
 - only the important parts, with open or unverified items called out honestly
 
-Both skills only read. They never edit, commit or publish anything.
+All skills only read. They never edit, commit or publish anything.
 
 ## Usage
 
@@ -62,6 +63,33 @@ Text after the target narrows the focus. Follow-up questions in the same session
 
 **Codex:** `$explain [args]`
 
+### Summary plus explanation
+
+| You type | It reports |
+|---|---|
+| `/explain-summarize` | the conversation's subject, or asks what to report on |
+| `/explain-summarize docs/plans/2026-plan.md` | linked summary bullets of the plan, then a detailed walkthrough |
+| `/explain-summarize branch` | the current branch: short summary first, then diagrams, tables and links |
+| `/explain-summarize #42` | a pull request, summarized and then explained |
+| `/explain-summarize chat` | this chat's decisions as bullets, then how they fit together |
+
+It accepts every target that `explain` or `summarize` accepts. The report looks like this:
+
+```
+# Title
+core idea in one or two sentences
+## Summary       ← summarize rules: flat linked bullets
+## Explanation   ← explain rules: diagrams with Notes, tables, file:line links
+```
+
+**Note:** the core idea appears once at the top, then the same facts are given short and then in depth, with the same links in both parts.
+
+**Claude Code:** `/code-explainer:explain-summarize [target] [focus]`, or bare `/explain-summarize` as a personal skill.
+
+**Codex:** `$explain-summarize [target] [focus]`
+
+**Other agents:** load `skills/explain-summarize/SKILL.md` through the host's skill mechanism. It reads `../explain/SKILL.md` and `../summarize/SKILL.md` with ordinary file tools, so keep all three skill directories side by side.
+
 ## Installation
 
 ### Claude Code
@@ -71,13 +99,14 @@ claude plugin marketplace add svtlv/cc-stuff
 claude plugin install code-explainer@svtlv-cc-stuff
 ```
 
-For bare `/explain` and `/summarize` commands, copy the skills into your personal skills:
+For bare `/explain`, `/summarize` and `/explain-summarize` commands, copy the skills into your personal skills:
 
 ```bash
 git clone https://github.com/svtlv/cc-stuff.git
 mkdir -p ~/.claude/skills
 cp -R ./cc-stuff/code-explainer/skills/explain ~/.claude/skills/
 cp -R ./cc-stuff/code-explainer/skills/summarize ~/.claude/skills/
+cp -R ./cc-stuff/code-explainer/skills/explain-summarize ~/.claude/skills/
 ```
 
 For local development: `claude --plugin-dir ./cc-stuff/code-explainer`.
@@ -89,12 +118,14 @@ codex plugin marketplace add svtlv/cc-stuff
 codex plugin add code-explainer@svtlv-cc-stuff
 ```
 
-For a standalone install, copy either or both of `skills/explain` and `skills/summarize` into `~/.agents/skills/` (personal) or the repository's `.agents/skills/` (project). Restart the session after installing.
+For a standalone install, copy any of `skills/explain`, `skills/summarize` and `skills/explain-summarize` into `~/.agents/skills/` (personal) or the repository's `.agents/skills/` (project). `explain-summarize` needs the other two copied beside it. Restart the session after installing.
 
 ## Layout
 
 ```
 skills/
+├── explain-summarize/
+│   └── SKILL.md          # load both skills → one target → Summary, then Explanation
 ├── summarize/
 │   └── SKILL.md          # select input → read → short bullets with verified links
 └── explain/

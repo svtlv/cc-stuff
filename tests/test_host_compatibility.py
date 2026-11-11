@@ -50,7 +50,7 @@ class HostCompatibility(unittest.TestCase):
         return roster
 
     def test_manifest_and_registry_consistency(self):
-        self.assertEqual(validate(ROOT), (3, 6))
+        self.assertEqual(validate(ROOT), (3, 7))
 
     def test_binding_and_unrelated_hook_isolation(self):
         for host in ('claude', 'codex'):
