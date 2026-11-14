@@ -1,0 +1,23 @@
+{
+  "name": "autopilot",
+  "version": "0.1.0",
+  "description": "Plan and implement tasks autonomously: interactive planning with the user, a plan explanation, then a supervised implementation run with automatic restarts and live status, plus guided setup of the plan runner and model router.",
+  "author": {
+    "name": "svtlv",
+    "url": "https://github.com/svtlv"
+  },
+  "homepage": "https://github.com/svtlv/cc-stuff/tree/master/autopilot",
+  "repository": "https://github.com/svtlv/cc-stuff",
+  "license": "MIT",
+  "keywords": [
+    "autonomous",
+    "planning",
+    "plan-execution",
+    "model-routing",
+    "ralphex",
+    "agrouter",
+    "claude",
+    "codex"
+  ],
+  "skills": "./skills/"
+}

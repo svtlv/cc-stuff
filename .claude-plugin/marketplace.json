@@ -5,6 +5,11 @@
   },
   "plugins": [
     {
+      "name": "autopilot",
+      "source": "./autopilot",
+      "description": "Plan with the user, explain the plan, then implement it under supervision with auto-restarts; guided runner and router setup"
+    },
+    {
       "name": "code-explainer",
       "source": "./code-explainer",
       "description": "Explain code and plans with diagrams and tables, summarize files, folders, designs, text and chats in short linked bullets, or combine both in one report"

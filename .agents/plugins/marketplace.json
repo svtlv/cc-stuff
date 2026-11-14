@@ -5,6 +5,18 @@
   },
   "plugins": [
     {
+      "name": "autopilot",
+      "source": {
+        "source": "local",
+        "path": "./autopilot"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
       "name": "code-explainer",
       "source": {
         "source": "local",

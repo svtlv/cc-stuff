@@ -6,6 +6,7 @@ A public collection of plugins for developer workflows. See each plugin for its 
 
 | Plugin | Description | Version |
 |--------|-------------|---------|
+| [autopilot](./autopilot/) | Plan a task with you, explain the plan, then implement it autonomously under supervision with automatic restarts and live status; includes guided setup of the plan runner and model router | 0.1.0 |
 | [code-explainer](./code-explainer/) | Explain code and plans with diagrams and tables, summarize files, folders, designs, text and chats in short linked bullets, or combine both in one report | 0.3.0 |
 | [partner-agents](./partner-agents/) | Run AI agents as equal partners in their own terminal tabs (Orca-aware), debating every decision with you, with an exclusive write baton | 1.1.0 |
 | [pr-review-toolkit](./pr-review-toolkit/) | Address supplied review feedback or fetch GitHub PR and Orca editor comments in Claude Code and Codex | 0.7.1 |
@@ -16,30 +17,32 @@ A public collection of plugins for developer workflows. See each plugin for its 
 
 ```bash
 claude plugin marketplace add svtlv/cc-stuff
+claude plugin install autopilot@svtlv-cc-stuff
 claude plugin install code-explainer@svtlv-cc-stuff
 claude plugin install partner-agents@svtlv-cc-stuff
 claude plugin install pr-review-toolkit@svtlv-cc-stuff
 ```
 
-Invoke skills with `/code-explainer:explain`, `/code-explainer:summarize`, `/code-explainer:explain-summarize`, `/partner-agents:partner` or `/pr-review-toolkit:address-review-comments`.
+Invoke skills with `/autopilot:autopilot`, `/autopilot:autopilot-plan`, `/autopilot:autopilot-run`, `/autopilot:autopilot-setup`, `/code-explainer:explain`, `/code-explainer:summarize`, `/code-explainer:explain-summarize`, `/partner-agents:partner` or `/pr-review-toolkit:address-review-comments`.
 
 ### Codex
 
 ```bash
 codex plugin marketplace add svtlv/cc-stuff
+codex plugin add autopilot@svtlv-cc-stuff
 codex plugin add code-explainer@svtlv-cc-stuff
 codex plugin add partner-agents@svtlv-cc-stuff
 codex plugin add pr-review-toolkit@svtlv-cc-stuff
 ```
 
-Invoke skills with `$explain`, `$summarize`, `$explain-summarize`, `$partner` or `$address-review-comments`. Codex in the desktop app can also install from the registered marketplace through its Plugins UI. Review and trust the partner plugin's hooks in Codex before using them. See [Codex packaging](https://developers.openai.com/plugins/build/plugins) for marketplace and hook support.
+Invoke skills with `$autopilot`, `$autopilot-plan`, `$autopilot-run`, `$autopilot-setup`, `$explain`, `$summarize`, `$explain-summarize`, `$partner` or `$address-review-comments`. Codex in the desktop app can also install from the registered marketplace through its Plugins UI. Review and trust the partner plugin's hooks in Codex before using them. See [Codex packaging](https://developers.openai.com/plugins/build/plugins) for marketplace and hook support.
 
 ### Local development
 
 ```bash
 git clone https://github.com/svtlv/cc-stuff.git
 cd cc-stuff
-claude --plugin-dir ./code-explainer --plugin-dir ./partner-agents --plugin-dir ./pr-review-toolkit
+claude --plugin-dir ./autopilot --plugin-dir ./code-explainer --plugin-dir ./partner-agents --plugin-dir ./pr-review-toolkit
 ```
 
 For Codex, register the checkout with `codex plugin marketplace add .`, then install the plugins with the same `codex plugin add` commands above. Restart the host session after changing installed plugin files.
@@ -47,6 +50,25 @@ For Codex, register the checkout with `codex plugin marketplace add .`, then ins
 Both hosts use the same skills and scripts. Claude reads `.claude-plugin/marketplace.json`; Codex reads `.agents/plugins/marketplace.json`. Each plugin includes a manifest for each host.
 
 ## Plugin Overview
+
+### [autopilot](./autopilot/)
+
+Takes a task from description to implemented code with the [ralphex](https://github.com/svtlv/ralphex) plan runner and the [agrouter](https://github.com/svtlv/agrouter) model router, with you in the loop:
+
+- `autopilot` runs the whole flow: interactive planning, a summary and explanation of the plan (through code-explainer's `explain-summarize` when installed), then the choice to implement or stop
+- `autopilot-plan` only plans: it relays every clarifying question and plan draft (accept, revise, edit, reject) and stops with a plan file
+- `autopilot-run` only executes an existing plan: it reports the phase, the current task and what the run is doing now, quotes every error, and restarts failed attempts automatically
+- `autopilot-setup` installs or upgrades both tools, stores the classifier key (TypeSafe or OpenAI) in the global user config, and writes a repository config with routed, pinned or fixed models and efforts
+
+**Claude Code:** `/autopilot:autopilot [task | plan file]`, `/autopilot:autopilot-plan [task]`, `/autopilot:autopilot-run <plan file>`, `/autopilot:autopilot-setup`
+
+**Codex:** `$autopilot`, `$autopilot-plan`, `$autopilot-run`, `$autopilot-setup`
+
+**Other hosts:** any agent that loads `SKILL.md` skills and runs shell commands; copy the four skill directories side by side (see the [plugin README](./autopilot/README.md#install))
+
+**Requires:** Python 3.9+, git, `ralphex.windows` (or `ralphex`), and for routing `agrouter` with a classifier key; `autopilot-setup` installs the last two
+
+---
 
 ### [code-explainer](./code-explainer/)
 

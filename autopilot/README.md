@@ -1,0 +1,179 @@
+# autopilot
+
+Take a task from description to implemented code, with you in the loop.
+autopilot drives the [ralphex](https://github.com/svtlv/ralphex) plan runner
+(the `ralphex.windows` build) and the
+[agrouter](https://github.com/svtlv/agrouter) model router from Claude Code
+or Codex: it plans with you, explains the plan, asks whether to build it,
+then builds it under supervision.
+
+```
+ task ─► autopilot-plan ─► explain-summarize ─► implement? ─┬─► autopilot-run ─► report
+            (Q&A, drafts)     (plan report)                 └─► stop: plan kept
+```
+**Note:** `autopilot` chains the other skills. Each one also works on its own.
+
+## Skills
+
+| Skill | Claude Code | Codex | What it does |
+|---|---|---|---|
+| Full run | `/autopilot:autopilot [task \| plan.md]` | `$autopilot` | Plan → explain → implement or stop. A file path goes to the run, which checks it first. Asks for a description when none is given. |
+| Plan only | `/autopilot:autopilot-plan [task \| --redesign file]` | `$autopilot-plan` | Starts the runner's interactive planning and relays every question and draft (accept, revise, edit, reject). Ends with `docs/plans/<name>.md`. `--redesign` turns a design doc or an unsuitable plan into a runnable plan, leaving the original untouched. |
+| Run only | `/autopilot:autopilot-run <plan.md> [-- flags]` | `$autopilot-run` | Checks the plan against the runner's format (tasks, checkboxes, tests); an unsuitable one is redesigned with autopilot-plan first. Executes it, reports phase, task and current activity every few minutes, quotes every error and restarts failed attempts automatically. |
+| Setup | `/autopilot:autopilot-setup [tools\|key\|repo]` | `$autopilot-setup` | Installs or upgrades both tools, stores the classifier key globally, and writes this repository's config with routed, pinned or fixed models. |
+
+Flags after `--` go to the runner unchanged, for example
+`/autopilot:autopilot-run docs/plans/cache.md -- --worktree`.
+
+## How It Works
+
+Agents run commands without a terminal and cannot keep a process open
+between calls, while the runner asks questions in a terminal picker and runs
+for hours. A small Python driver (`skills/autopilot/scripts/autopilot.py`,
+standard library only) sits between them:
+
+```
+agent ──► autopilot.py plan|run ──► detached supervisor ──► runner CLI
+  ▲                                   │  stdin pipe, fzf/editor shims
+  │                                   ▼
+  └──── autopilot.py wait ◄──── state.json + output.log
+  └──── autopilot.py answer ───► inbox ───► supervisor ───► runner stdin
+```
+**Note:** planning and the run both go through this path, so agrouter
+picks the model for plan creation as well as for tasks and reviews (unless
+`plan_model` pins it). The supervisor keeps the runner alive between agent turns. The
+agent polls with `wait` (returns on events or every 4 minutes) and replies
+with `answer`.
+
+| Situation | Behavior |
+|---|---|
+| Planner asks a question | Shown to you with its options; your answer goes back as typed text. |
+| Plan draft ready | Digest shown; accept, revise with feedback, edit the draft file directly, or reject. |
+| Plan finished, you want changes | Ask any time before the run ("drop task 3", "use Redis instead"), as many rounds as you like. Small changes are edited in place, keeping checked boxes; bigger ones are re-planned. Each round shows a task-level diff and is checked against ralphex's format. A replaced plan is kept as a backup. Mid-run changes stop the run at a safe point, edit, and resume. |
+| "Continue with implementation?" | Answered "no" by the plan step; implementation starts only after you choose it. |
+| Run fails (crash, kill, network) | Restarted after 30 s, 60 s, 120 s … up to 5 times; finished tasks are kept. |
+| Codex can't do the external code review (not installed, logged out) | Setup tells you up front; runs skip the review automatically and say why. If Codex fails mid-review, the run restarts without it, keeping finished tasks. |
+| You want to skip the external review | Say so: before the run it starts without it; during the run it ends the review at once (ralphex's manual break) or as soon as the review starts. |
+| Plan review | Optional (setup asks): the other model (Codex in the Claude setup, Claude in the Codex setup) reviews each plan draft read-only, and its findings shape the recommendation. |
+| Only Codex is available | Setup recommends Codex and skips unavailable Claude plan reviews. Claude availability includes login and router checks. A Claude-configured session can fall back to Codex when its sandbox and routing support execution; otherwise setup explains what to change. |
+| You want to skip a plan review | Say "skip the Claude review", "skip the Codex review", or "skip the plan review". Planning continues and the skip is logged. A missing or logged-out reviewer is skipped automatically. |
+| Usage limit | ralphex retries the same step every 15 minutes (autopilot adds `--wait` when your config lacks `wait_on_limit`); if ralphex exits instead, autopilot waits until the reported reset time and restarts. You see which tool is limited and when it resets, never a false "hung" or error. A reset hours away gets a decision with a 5-minute default: continue on Codex, skip the limited external review, or wait. |
+| Same error three times with no progress | The driver stops; the agent diagnoses and fixes. |
+| Driver gives up (fatal error, restart limit) | The agent recovers on its own: known fixes (worktree instead of a dirty tree, stale worktree cleanup, config fixes, router bypass when the key fails) or a diagnosed code/plan fix committed on the run's branch, then starts again. Up to 3 rounds; never destructive git commands. |
+| You don't answer | Each question has a recommended answer, chosen with a reason, and a response time that fits it: 10 min for planner questions, 30 min for the plan draft, 60 min to decide whether to implement (reminders before the long ones; say "wait" for more). Then the recommendation is taken and the work continues to the end. Times are configurable in `~/.config/autopilot/config`. Installing software and credentials always wait for you. |
+| Flow ends (any outcome) | A full report: summary, decisions with who made them and why, a walkthrough of what was built, problems and recoveries, next steps. Saved next to the session state. |
+
+In hosts that notify on background commands (Claude Code) the monitor runs
+in the background, so you can keep chatting during a run; elsewhere it runs
+in the foreground with commentary updates (see the table under Install).
+When the host supports subagents, autopilot may use read-only subagents to
+diagnose failures while the run continues.
+
+Session state lives in `~/.local/state/autopilot/` (`%LOCALAPPDATA%\autopilot`
+on Windows; `AUTOPILOT_STATE_DIR` overrides), outside the repository.
+
+## Setup
+
+The other three skills check for ralphex.windows and agrouter first. When
+either is missing, they ask to run setup and continue your original request
+afterwards; nothing starts without both tools. A missing key or repository
+config gets an offer to run setup, with the option to continue anyway.
+
+Run `/autopilot:autopilot-setup` (or `$autopilot-setup`) directly. It walks through:
+
+1. **Check** — installed and latest versions, configs, key presence.
+2. **Install or upgrade** — `ralphex.windows` via Homebrew, the install
+   script, the Windows installer or `go install`; `agrouter` via
+   `go install` (Go 1.27+).
+3. **Classifier and key** — TypeSafe (default) or OpenAI. The key goes
+   into `~/.config/agrouter/config` with user-only permissions, never into
+   the repository.
+4. **Repository config** — executor (Claude Code or Codex), model selection
+   (full routing, pinned model with routed effort, fixed models, or no
+   router), project docs for routing, external review, and limit waiting.
+   The recommended result:
+
+   ```
+   .ralphex/config                     commented template, routed keys explained
+   .ralphex/scripts/codex-agrouter.sh  external Codex review through agrouter
+   .agrouter/config                    long-context limits, only for large doc sets
+   ```
+   **Note:** on Windows the wrapper is `codex-agrouter.cmd` plus
+   `codex-agrouter.py`. These files are safe to commit; the classifier key stays in
+   your global config. Setup recommends committing them, because ralphex
+   will not start on the default branch with uncommitted config.
+5. **Verify** — one routing request to confirm the key and config.
+
+On a repository that is already set up, setup switches to **reconfigure
+mode**: it shows every property with its current value and where it comes
+from (this repository, your global config, or built in), lists issues such
+as doc drift, and changes only the properties you pick — executor, phase
+models, routing docs, router on/off, external review, limits, large-doc
+routing, routable CLIs, classifier and key, response times, tool versions.
+It then shows the diff and offers to commit or undo. Hand-written wrapper
+scripts are never overwritten without asking.
+
+## Requirements
+
+| Need | For |
+|---|---|
+| Python 3.9+, git | the driver |
+| `ralphex.windows` or `ralphex` | planning and execution |
+| `agrouter` + classifier key | model routing (optional: runs work with fixed models too) |
+| `claude` and/or `codex` CLI, logged in | the models doing the work |
+| [code-explainer](../code-explainer/) (optional) | the plan report in the full run; a compact built-in report is used without it |
+
+## Install
+
+Claude Code:
+
+```bash
+claude plugin marketplace add svtlv/cc-stuff
+claude plugin install autopilot@svtlv-cc-stuff
+claude plugin install code-explainer@svtlv-cc-stuff   # optional, for plan reports
+```
+
+Codex:
+
+```bash
+codex plugin marketplace add svtlv/cc-stuff
+codex plugin add autopilot@svtlv-cc-stuff
+codex plugin add code-explainer@svtlv-cc-stuff        # optional
+```
+
+Local development: `claude --plugin-dir ./autopilot`.
+
+Any other agent host that loads `SKILL.md` skills (Gemini CLI, OpenCode,
+Cursor, Copilot, ...): copy or symlink the four directories in
+`autopilot/skills/` side by side into the host's skills directory (they
+reference each other with `../`), plus `code-explainer/skills/*` for plan
+reports. Invoke them by name ("use the autopilot skill to add caching").
+
+The skills adapt to what the host can do, not to its name:
+
+| Host can... | Then |
+|---|---|
+| run shell commands (required) | the driver does all terminal work |
+| notify when a background command ends (Claude Code) | monitoring runs in the background and you can chat during a run |
+| poll an async process (Codex) | monitoring polls inside the turn |
+| neither | monitoring loops in the foreground with short waits |
+| load skills by name, ask with a question tool, start subagents | used when present; otherwise files are read directly, questions go in plain text, work is done inline |
+
+Sandboxed shells need full access (network and long-lived processes) for
+autopilot commands; session state falls back to `.git/autopilot` when the
+home directory is not writable. The host and the executor are independent:
+a Codex or Gemini host can drive runs executed by Claude Code, and the
+other way round.
+
+## Limitations
+
+- Native Windows scripts use Python (`py -3` or `python`) and the
+  `codex-agrouter.cmd` + `.py` wrapper. See the
+  [Windows guide](skills/autopilot/references/windows.md). CI runs the driver
+  suite on Windows and Linux; real ralphex/model calls still need an
+  integration run.
+- Planning runs through the runner's numbered-answer fallback, so the
+  planner's questions arrive as plain text, not a fuzzy picker.
+- Restarts rely on the runner resuming from the first unchecked task; a run
+  in `--worktree` mode that is interrupted keeps its worktree, which blocks a
+  restart until it is removed (reported as a fatal error with the fix).

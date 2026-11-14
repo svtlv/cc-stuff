@@ -1,0 +1,1465 @@
+"""Exercise the autopilot driver against a fake plan runner CLI."""
+import json
+import os
+import shutil
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import textwrap
+import time
+import unittest
+import unittest.mock
+
+ROOT = Path(__file__).resolve().parents[1]
+DRIVER = ROOT / 'autopilot/skills/autopilot/scripts/autopilot.py'
+sys.path.insert(0, str(DRIVER.parent))
+import autopilot  # noqa: E402
+
+
+def python_tool(path, source):
+    """An executable fixture on POSIX, a Python + CMD pair on Windows."""
+    if os.name == 'nt':
+        script = path.with_suffix('.py')
+        script.write_text(source, encoding='utf-8')
+        command = path.with_suffix('.cmd')
+        with command.open('w', encoding='utf-8', newline='') as handle:
+            handle.write(f'@echo off\r\n"{sys.executable}" -X utf8 "{script}" %*\r\n'
+                         'exit /b %ERRORLEVEL%\r\n')
+        return command
+    path.write_text(f'#!{sys.executable}\n' + source, encoding='utf-8')
+    path.chmod(0o755)
+    return path
+
+
+def system_tool_path():
+    """Keep git/Python available without inheriting model CLIs from the machine."""
+    folders = [str(Path(shutil.which('git')).parent), str(Path(sys.executable).parent)]
+    if os.name == 'nt':
+        folders.append(str(Path(os.environ['SystemRoot']) / 'System32'))
+    return os.pathsep.join(folders)
+
+
+def runner_split(text):
+    """Port of the runner's splitArgs (pkg/executor/executor.go): quotes and backslashes."""
+    args, cur, quote, escaped = [], '', None, False
+    for ch in text:
+        if escaped:
+            cur, escaped = cur + ch, False
+        elif ch == '\\':
+            escaped = True
+        elif ch in '"\'':
+            if quote is None:
+                quote = ch
+            elif quote == ch:
+                quote = None
+            else:
+                cur += ch
+        elif ch == ' ' and quote is None:
+            if cur:
+                args.append(cur)
+            cur = ''
+        else:
+            cur += ch
+    return args + ([cur] if cur else [])
+
+
+FAKE = textwrap.dedent('''\
+    import os, subprocess, sys
+    from pathlib import Path
+    sys.path.insert(0, os.environ['AUTOPILOT_DRIVER_DIR'])
+    import autopilot
+    args = [a for a in sys.argv[1:] if a != '--no-color']
+    if args == ['--version']:
+        print('fake-ralphex 1.0.0'); sys.exit(0)
+    def out(s, end='\\n'):
+        sys.stdout.write(s + end); sys.stdout.flush()
+    def line():
+        return sys.stdin.readline().strip()
+    if os.environ.get('FAKE_FATAL'):
+        out('error: unknown flag --bogus'); sys.exit(2)
+    if os.environ.get('FAKE_MODE') == 'claude-down' and '--codex' not in args:
+        out('--- task iteration 1 ---')
+        out('ERROR: claude execution: Not logged in. Run claude auth login')
+        sys.exit(1)
+    if os.environ.get('FAKE_MODE') == 'claude-down' and args[0] != '--plan':
+        out('CODEX-FALLBACK: ' + ' '.join(args))
+        plan = Path(args[0]); plan.write_text(plan.read_text().replace('- [ ]', '- [x]'))
+        sys.exit(0)
+    if args[0] == '--plan':
+        out('--- plan iteration 1 ---')
+        out('agrouter: selection: {"cli":"claude","model":"claude-opus-5-5","effort":"high"}')
+        # like the runner: exec.LookPath("fzf") (PATHEXT finds fzf.cmd on Windows), then
+        # start the resolved file directly, with no shell (Go's os/exec, not cmd /C)
+        import shutil
+        p = subprocess.run([shutil.which('fzf'), '--prompt', 'Which cache backend?: ', '--height', '10'],
+                           input='Redis\\nIn-memory, local\\nOther (type your own answer)\\n',
+                           text=True, capture_output=True)
+        assert p.returncode == 1, p.returncode
+        out('Enter your answer: ', end='')
+        out('[26-01-01 10:00:00] ANSWER: ' + line())
+        while True:
+            out('\\n━━━ Plan Draft ━━━\\n# Plan: cache\\n### Task 1: add\\n- [ ] do it\\n━━━━━━━━━━━━━━━━━━\\n')
+            out('Review the plan draft')
+            for i, o in enumerate(['Accept', 'Revise', 'Interactive review', 'Reject'], 1):
+                out(f'  {i}) {o}')
+            out('Enter number (1-4): ', end='')
+            pick = line()
+            if pick == '2':
+                out('\\nEnter revision feedback: ', end='')
+                out('[26-01-01 10:00:01] FEEDBACK: ' + line())
+                continue
+            if pick == '3':
+                tmp = Path('edit-tmp.md'); tmp.write_text('x')
+                # like the runner: resolve the editor, then execx adds "cmd /C" for a .cmd path
+                import shutil
+                editor = shutil.which(os.environ['VISUAL'])
+                argv = [editor, str(tmp)]
+                if editor.lower().endswith(('.cmd', '.bat')):
+                    argv = ['cmd', '/C'] + argv
+                subprocess.run(argv, check=True)
+                out('[26-01-01 10:00:02] EDITED: ' + tmp.read_text().splitlines()[0]); tmp.unlink()
+                continue
+            break
+        Path('docs/plans').mkdir(parents=True, exist_ok=True)
+        Path('docs/plans/cache.md').write_text('### Task 1: add\\n- [ ] do it\\n')
+        out('\\nplan creation completed in 1s, created docs/plans/cache.md')
+        out('Continue with plan implementation? [y/N]: ', end='')
+        out('ANSWER-CONTINUE: ' + line())
+        sys.exit(0)
+    mode = os.environ.get('FAKE_MODE', '')
+    if mode in ('review', 'review-later'):
+        import signal, time
+        if '--external-review-tool=none' in args:
+            out('ARGS-NONE'); sys.exit(0)
+        broke = []
+        if hasattr(signal, 'SIGQUIT'):
+            signal.signal(signal.SIGQUIT, lambda *a: broke.append(1))
+        out('--- task iteration 1 ---')
+        time.sleep(3 if mode == 'review-later' else 0.2)
+        out('--- codex iteration 1 ---')
+        for _ in range(100):
+            if broke:
+                out('[26-01-01 10:00:00] manual break requested, external review terminated early')
+                break
+            time.sleep(0.1)
+        out('--- review 2 ---'); sys.exit(0)
+    if mode == 'codex-down':
+        if '--external-review-tool=none' in sys.argv:
+            out('ARGS-NONE'); sys.exit(0)
+        out('--- codex iteration 1 ---')
+        out('[26-01-01 10:00:00] ERROR: codex: exec: "codex": executable file not found in $PATH')
+        sys.exit(1)
+    if mode == 'codex-banner':
+        out('--- task iteration 1 ---')
+        out('[26-01-01 10:00:00] model: gpt-6.1-sol')
+        out('[26-01-01 10:00:00] reasoning effort: high')
+        out('[26-01-01 10:00:01] Task 1: working')
+        import time; time.sleep(1.5)
+        out('agrouter: selection: {"cli":"claude","model":"claude-opus-5-5","effort":"medium"}')
+        out('--- claude evaluating codex findings ---')
+        time.sleep(1.5)
+        sys.exit(0)
+    if mode == 'env':
+        leaked = [k for k in ('CLAUDECODE', 'CODEX_SANDBOX', 'CODEX_THREAD_ID') if k in os.environ]
+        out('LEAKED=' + ','.join(leaked)); sys.exit(0)
+    if mode == 'limit-wait':
+        import time
+        out('--- task iteration 1 ---')
+        out('[26-01-01 10:00:00] I am adding rate limit middleware to the API')
+        out('[26-01-01 10:00:01] Task 1: add rate limiting')
+        out("agrouter: You've hit your limit; weekly subscription quota exhausted; resets at 2099-01-01T00:00:00Z")
+        out('[26-01-01 10:00:02] rate limit detected: "You' + "'" + 've hit your limit" in claude output, waiting 2s before retry...')
+        time.sleep(2.5)
+        out("agrouter: You've hit your limit; weekly subscription quota exhausted; resets at 2099-01-01T00:00:00Z")
+        out('[26-01-01 10:00:05] rate limit detected: "You' + "'" + 've hit your limit" in claude output, waiting 2s before retry...')
+        time.sleep(2.5)
+        out('[26-01-01 10:00:08] continuing the task after the wait')
+        sys.exit(0)
+    if mode in ('limit-exit', 'limit-long'):
+        import datetime, time
+        counter = Path(os.environ['FAKE_COUNTER'])
+        n = int(counter.read_text()) if counter.exists() else 0
+        counter.write_text(str(n + 1))
+        if n == 0:
+            secs = 2 if mode == 'limit-exit' else 36000
+            when = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=secs))
+            out("agrouter: You've hit your limit; weekly subscription quota exhausted; resets at "
+                + when.strftime('%Y-%m-%dT%H:%M:%SZ'))
+            out('error: detected "You' + "'" + 've hit your limit" in claude output')
+            out("run 'claude /usage' for more information")
+            sys.exit(1)
+        out('--- task iteration 1 ---'); sys.exit(0)
+    counter = Path(os.environ['FAKE_COUNTER'])
+    n = int(counter.read_text()) if counter.exists() else 0
+    counter.write_text(str(n + 1))
+    out('--- task iteration 1 ---')
+    if n == 0:
+        out('[26-01-01 10:00:00] ERROR: claude execution: signal: killed')
+        out('Failed: 2026-01-01 10:00:01 (1s) - runner: task phase: killed'); sys.exit(1)
+    plan = Path(args[0]); plan.write_text(plan.read_text().replace('- [ ]', '- [x]'))
+    out('--- claude review 1 ---')
+    out('[26-01-01 10:00:05] reviewing changes')
+    sys.exit(0)
+''')
+
+
+class AutopilotDriver(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name)
+        self.repo = base / 'repo'
+        self.repo.mkdir()
+        subprocess.run(['git', 'init', '-q'], cwd=self.repo, check=True)
+        fake = base / ('fake-cli.py' if os.name == 'nt' else 'fake-cli')
+        fake.write_text(f'#!{sys.executable}\n' + FAKE, encoding='utf-8')
+        fake.chmod(0o755)
+        self.fakebin = base / 'bin'
+        self.fakebin.mkdir()
+        for name in ('claude', 'codex'):
+            python_tool(self.fakebin / name, textwrap.dedent('''\
+                import json, os, sys
+                if '--version' in sys.argv:
+                    print('cli 0.169.0')
+                elif 'auth' in sys.argv:
+                    print(json.dumps({'loggedIn': os.environ.get('FAKE_CLAUDE_LOGIN', '1') == '1'}))
+                elif 'login' in sys.argv:
+                    sys.exit(0 if os.environ.get('FAKE_CODEX_LOGIN', '1') == '1' else 1)
+                else:
+                    print('No findings.')
+                '''))
+        self.env = dict(os.environ, AUTOPILOT_CLI=str(fake),
+                        AUTOPILOT_STATE_DIR=str(base / 'state'), AUTOPILOT_BACKOFF='0',
+                        AUTOPILOT_NO_ROUTER='1', AUTOPILOT_LIMIT_MIN='1', AUTOPILOT_CODEX_LOGIN_OK='1',
+                        RALPHEX_CONFIG_DIR=str(base / 'no-runner-config'),
+                        AGROUTER_CONFIG_DIR=str(base / 'no-router-config'),
+                        AUTOPILOT_CONFIG=str(base / 'no-autopilot-config'),
+                        AUTOPILOT_DRIVER_DIR=str(DRIVER.parent), PYTHONUTF8='1',
+                        PATH=str(self.fakebin) + os.pathsep + os.environ['PATH'],
+                        FAKE_COUNTER=str(base / 'counter'))
+
+    def drive(self, *args, env=None):
+        res = subprocess.run([sys.executable, str(DRIVER), *args], cwd=self.repo,
+                             env=env or self.env, capture_output=True, text=True,
+                             encoding='utf-8', timeout=60)
+        self.assertTrue(res.stdout.strip(), res.stderr)
+        return json.loads(res.stdout.strip().splitlines()[-1])
+
+    def wait(self, sid, since=0):
+        return self.drive('wait', sid, '--timeout', '20', '--since', str(since))
+
+    def until(self, sid, status, since=0):
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            rep = self.wait(sid, since)
+            if rep['status'] == status:
+                return rep
+            since = rep['seq']
+        self.fail(f'never reached {status}: {rep}')
+
+    def test_plan_question_revise_edit_accept(self):
+        sid = self.drive('plan', '--desc', 'add caching')['session']
+        rep = self.until(sid, 'waiting')
+        w = rep['waiting']
+        self.assertEqual(w['kind'], 'question')
+        self.assertEqual(w['question'], 'Which cache backend?')
+        self.assertEqual(w['options'], ['Redis', 'In-memory, local'])
+        self.drive('answer', sid, '--choice', '2')
+        rep = self.until(sid, 'waiting', rep['seq'])
+        self.assertEqual(rep['waiting']['kind'], 'draft')
+        self.assertIn('# Plan: cache', Path(rep['waiting']['draft_file']).read_text())
+        self.drive('answer', sid, '--action', 'revise', '--text', 'split\ninto two')
+        rep = self.until(sid, 'waiting', rep['seq'])
+        edited = Path(rep['waiting']['edited_file'])
+        edited.write_text('EDITED BY USER\n')
+        self.drive('answer', sid, '--action', 'edited')
+        rep = self.until(sid, 'waiting', rep['seq'])
+        self.drive('answer', sid, '--action', 'accept')
+        rep = self.until(sid, 'done', rep['seq'])
+        self.assertEqual(rep['plan_file'], 'docs/plans/cache.md')
+        # planning goes through the router too: its selection is tracked like a run's
+        self.assertEqual(rep['model'], {'cli': 'claude', 'model': 'claude-opus-5-5', 'effort': 'high'})
+        plan_session = self.drive('report', sid)['sessions'][0]
+        self.assertEqual(plan_session['models_used'], {'claude/claude-opus-5-5/high': 1})
+        log = Path(rep['log']).read_text()
+        for expected in ('ANSWER: In-memory, local', 'FEEDBACK: split into two',
+                         'EDITED: EDITED BY USER', 'ANSWER-CONTINUE: n'):
+            self.assertIn(expected, log)
+
+    def test_run_restarts_after_transient_failure(self):
+        plan = self.repo / 'docs/plans/p.md'
+        plan.parent.mkdir(parents=True)
+        plan.write_text('### Task 1: one\n- [ ] a\n- [ ] b\n')
+        sid = self.drive('run', '--plan', 'docs/plans/p.md')['session']
+        rep = self.until(sid, 'done')
+        self.assertEqual(rep['restarts'], 1)
+        self.assertEqual(rep['tasks'], {'done': 2, 'total': 2, 'current_task': None})
+        self.assertEqual(rep['phase'], 'code review')
+        st = json.loads((Path(self.env['AUTOPILOT_STATE_DIR']) / 'sessions' / sid
+                         / 'state.json').read_text())
+        kinds = [e['kind'] for e in st['events']]
+        self.assertIn('error', kinds)
+        self.assertIn('restart', kinds)
+
+    def test_missing_tools_point_to_setup(self):
+        env = {k: v for k, v in self.env.items()
+               if k not in ('AUTOPILOT_CLI', 'AUTOPILOT_NO_ROUTER')}
+        env['PATH'] = system_tool_path()
+        report = self.drive('doctor', '--json', env=env)
+        self.assertEqual(len(report['missing_tools']), 2)
+        err = self.drive('plan', '--desc', 'x', env=env)['error']
+        self.assertIn('not installed: ralphex.windows, agrouter', err)
+        self.assertIn('autopilot-setup', err)
+        env['AUTOPILOT_CLI'] = self.env['AUTOPILOT_CLI']
+        self.assertIn('not installed: agrouter',
+                      self.drive('run', '--plan', 'missing.md', env=env)['error'])
+
+    def test_unanswered_prompts_take_recommendation_then_fallback(self):
+        env = dict(self.env, AUTOPILOT_TIMEOUTS='question=2,draft=2')
+        start = self.drive('plan', '--desc', 'add caching', env=env)
+        sid, flow = start['session'], start['flow']
+        rep = self.until(sid, 'waiting')
+        self.assertLessEqual(rep['auto_answer_in_s'], 2)
+        rec = self.drive('recommend', sid, '--choice', '2', '--reason', 'no new infra needed')
+        self.assertEqual(rec['recommended'], 'In-memory, local')
+        deadline = time.time() + 30
+        while (rep['waiting'] or {}).get('kind') != 'draft' and time.time() < deadline:
+            rep = self.wait(sid, rep['seq'])
+        self.assertEqual(rep['waiting']['kind'], 'draft')
+        # no recommendation for the draft: the fallback accepts it
+        rep = self.until(sid, 'done', rep['seq'])
+        plan = self.repo / 'docs/plans/cache.md'
+        run = self.drive('run', '--plan', str(plan.relative_to(self.repo)), '--flow', flow)
+        self.until(run['session'], 'done')
+        self.drive('log', run['session'], '--kind', 'fix', '--text', 'fixed flaky test',
+                   '--reason', 'same failure twice')
+        report = self.drive('report', '--flow', flow)
+        self.assertEqual([x['kind'] for x in report['sessions']], ['plan', 'run'])
+        answers = [(d['by'], d['answer']) for d in report['decisions'] if d['kind'] == 'answer']
+        self.assertEqual(answers, [('auto', 'In-memory, local'), ('auto', 'accept'),
+                                   ('autopilot', 'no')])
+        kinds = [d['kind'] for d in report['decisions']]
+        self.assertIn('recovery', kinds)
+        self.assertIn('fix', kinds)
+        auto = [d for d in report['decisions'] if d['by'] == 'auto']
+        self.assertIn('recommended', auto[0]['reason'])
+        self.assertIn('no new infra needed', auto[0]['reason'])
+        self.assertIn('accepted the draft', auto[1]['reason'])
+
+    def start_run(self, mode):
+        plan = self.repo / 'p.md'
+        plan.write_text('### Task 1: a\n- [ ] a\n')
+        env = dict(self.env, FAKE_MODE=mode)
+        return self.drive('run', '--plan', 'p.md', env=env), env
+
+    def state(self, sid):
+        return json.loads((Path(self.env['AUTOPILOT_STATE_DIR']) / 'sessions' / sid
+                           / 'state.json').read_text())
+
+    def test_runner_limit_wait_is_tracked_not_reported_as_errors(self):
+        start, _ = self.start_run('limit-wait')
+        self.assertIn('--wait=900s', start['command'])
+        rep = self.wait(start['session'])
+        self.assertEqual(rep['status'], 'running')
+        self.assertEqual(rep['limit']['tool'], 'claude')
+        self.assertEqual(rep['limit']['resets'], '2099-01-01T00:00:00Z')
+        self.assertGreater(rep['limit']['resets_in_s'], 10 ** 8)
+        rep = self.until(start['session'], 'done', rep['seq'])
+        st = self.state(start['session'])
+        kinds = [e['kind'] for e in st['events']]
+        self.assertEqual(kinds.count('limit'), 1)
+        self.assertIn('limit-retry', kinds)
+        self.assertIn('limit-cleared', kinds)
+        self.assertNotIn('error', kinds)
+        self.assertEqual(st['restarts'], [])
+        self.assertIsNone(rep['limit'])
+        report = self.drive('report', start['session'])
+        texts = [d.get('text', '') for d in report['decisions']]
+        self.assertTrue(any(t.startswith('added --wait') for t in texts))
+        self.assertTrue(any('waiting on a claude rate limit' in t for t in texts))
+        self.assertTrue(any('rate limit cleared' in t for t in texts))
+
+    def test_limit_exit_waits_for_reset_then_restarts(self):
+        start, _ = self.start_run('limit-exit')
+        rep = self.until(start['session'], 'done')
+        st = self.state(start['session'])
+        self.assertEqual([r['category'] for r in st['restarts']], ['limit'])
+        limit_events = [e for e in st['events'] if e['kind'] == 'limit']
+        self.assertEqual(limit_events[0]['handled_by'], 'autopilot')
+        self.assertLessEqual(limit_events[0]['wait_s'], 5)
+
+    def test_long_limit_is_handed_to_the_agent(self):
+        start, _ = self.start_run('limit-long')
+        rep = self.until(start['session'], 'failed')
+        failed = [e for e in rep['new_events'] if e['kind'] == 'failed'][-1]
+        self.assertEqual(failed['category'], 'limit')
+        self.assertIn('needs a decision', failed['reason'])
+        self.assertGreater(failed['resets_in_s'], 30000)
+
+    def test_host_session_vars_do_not_reach_the_runner(self):
+        env = dict(self.env, CLAUDECODE='1', CODEX_SANDBOX='seatbelt', CODEX_THREAD_ID='t')
+        plan = self.repo / 'p.md'
+        plan.write_text('### Task 1: a\n- [ ] a\n')
+        sid = self.drive('run', '--plan', 'p.md', env=dict(env, FAKE_MODE='env'))['session']
+        rep = self.until(sid, 'done')
+        self.assertIn('LEAKED=', Path(rep['log']).read_text())
+        self.assertNotIn('LEAKED=C', Path(rep['log']).read_text())
+
+    def test_running_model_and_executor_are_reported(self):
+        plan = self.repo / 'p.md'
+        plan.write_text('### Task 1: a\n- [ ] a\n')
+        env = dict(self.env, FAKE_MODE='codex-banner')
+        start = self.drive('run', '--plan', 'p.md', '--', '--codex', env=env)
+        sid = start['session']
+        deadline, model = time.time() + 20, None
+        while time.time() < deadline and (model or {}).get('effort') != 'high':
+            model = self.state(sid).get('model')
+            time.sleep(0.1)
+        self.assertEqual(model, {'cli': 'codex', 'model': 'gpt-6.1-sol', 'effort': 'high'})
+        rep = self.until(sid, 'done')
+        self.assertEqual(rep['executor'], 'codex')
+        report = self.drive('report', sid)['sessions'][0]
+        self.assertEqual(report['models_used'], {'codex/gpt-6.1-sol/high': 1,
+                                                 'claude/claude-opus-5-5/medium': 1})
+        self.assertEqual(rep['model'], {'cli': 'claude', 'model': 'claude-opus-5-5', 'effort': 'medium'})
+        self.assertEqual(rep['phase'], 'external review')
+        self.assertNotIn('error', [e['kind'] for e in self.state(sid)['events']])
+
+    def test_reminder_then_extend_then_never(self):
+        env = dict(self.env, AUTOPILOT_TIMEOUTS='question=4,question.remind=3')
+        sid = self.drive('plan', '--desc', 'add caching', env=env)['session']
+        rep = self.until(sid, 'waiting')
+        self.assertEqual(rep['auto_answer'], 'question')
+        # the open prompt does not wake wait again; the reminder does
+        rep = self.wait(sid, rep['seq'])
+        self.assertEqual([e['kind'] for e in rep['new_events']], ['reminder'])
+        self.drive('extend', sid, '--never')
+        time.sleep(4)
+        rep = self.drive('wait', sid, '--timeout', '1', '--since', str(rep['seq']))
+        self.assertEqual(rep['status'], 'waiting')
+        self.assertIsNone(rep['auto_answer_in_s'])
+        decisions = self.drive('report', sid)['decisions']
+        self.assertEqual(decisions[-1]['text'], 'more time to answer: no auto-answer')
+        self.drive('stop', sid)
+
+    def test_run_refuses_a_plan_the_runner_cannot_use(self):
+        (self.repo / 'design.md').write_text('# Design\n## 1. Decision\nCache it.\n')
+        err = self.drive('run', '--plan', 'design.md')['error']
+        self.assertIn('cannot use this plan', err)
+        self.assertIn('--redesign', err)
+
+    def until_phase(self, sid, phase):
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            if self.state(sid).get('phase') == phase:
+                return
+            time.sleep(0.1)
+        self.fail(f'never reached phase {phase}')
+
+    def test_skip_review_breaks_the_running_external_review(self):
+        start, _ = self.start_run('review')
+        self.until_phase(start['session'], 'external review')
+        self.assertEqual(self.drive('skip-review', start['session'])['when'], 'now')
+        rep = self.until(start['session'], 'done')
+        self.assertIn('ARGS-NONE' if os.name == 'nt' else 'manual break requested',
+                      Path(rep['log']).read_text())
+        texts = [d.get('text') for d in self.drive('report', start['session'])['decisions']]
+        self.assertIn('skip the external code review', texts)
+
+    def test_skip_review_is_queued_until_the_review_starts(self):
+        start, _ = self.start_run('review-later')
+        self.until_phase(start['session'], 'implementing tasks')
+        self.assertEqual(self.drive('skip-review', start['session'])['when'],
+                         'when the external review starts')
+        rep = self.until(start['session'], 'done')
+        self.assertIn('ARGS-NONE' if os.name == 'nt' else 'manual break requested',
+                      Path(rep['log']).read_text())
+
+    def test_codex_failing_in_review_restarts_without_it(self):
+        start, _ = self.start_run('codex-down')
+        rep = self.until(start['session'], 'done')
+        self.assertIn('ARGS-NONE', Path(rep['log']).read_text())
+        st = self.state(start['session'])
+        self.assertEqual([r['category'] for r in st['restarts']], ['review-skipped'])
+
+    def test_unusable_codex_review_is_skipped_at_start(self):
+        env = dict(self.env, FAKE_MODE='env')
+        env.pop('AUTOPILOT_CODEX_LOGIN_OK')
+        env['PATH'] = system_tool_path()
+        claude_only = self.fakebin / 'only-claude'
+        claude_only.mkdir()
+        for tool in self.fakebin.glob('claude*'):
+            shutil.copy2(tool, claude_only / tool.name)
+        env['PATH'] = str(claude_only) + os.pathsep + env['PATH']
+        plan = self.repo / 'p.md'
+        plan.write_text('### Task 1: a\n- [ ] a\n')
+        start = self.drive('run', '--plan', 'p.md', env=env)
+        self.assertIn('--external-review-tool=none', start['command'])
+        self.until(start['session'], 'done')
+        decisions = self.drive('report', start['session'])['decisions']
+        skip = [d for d in decisions if d.get('text') == 'skipped the external code review for this run']
+        self.assertEqual(skip[0]['reason'], 'codex is not installed')
+
+    def test_only_codex_can_run_and_claude_plan_review_is_skipped(self):
+        (self.repo / '.ralphex').mkdir()
+        (self.repo / '.ralphex/config').write_text('executor = codex\n')
+        (self.repo / '.autopilot').mkdir()
+        (self.repo / '.autopilot/config').write_text('[review]\nplan = auto\n')
+        env = dict(self.env, FAKE_CLAUDE_LOGIN='0', FAKE_MODE='env')
+        cap = self.drive('doctor', '--json', env=env)['reviews']
+        self.assertTrue(cap['codex']['usable'])
+        self.assertFalse(cap['claude']['usable'])
+        self.assertIn('claude auth login', cap['claude']['reason'])
+        self.assertFalse(cap['plan_review']['usable'])
+        plan = self.repo / 'p.md'
+        plan.write_text('### Task 1: a\n- [ ] a\n')
+        review = self.drive('review-plan', 'p.md', env=env)
+        self.assertTrue(review['skipped'])
+        self.assertEqual(review['reviewer'], 'claude')
+        start = self.drive('run', '--plan', 'p.md', env=env)
+        self.assertEqual(start['executor'], 'codex')
+        self.until(start['session'], 'done')
+
+    def test_claude_unavailable_falls_back_at_start_without_changing_config(self):
+        (self.repo / '.ralphex').mkdir()
+        config = self.repo / '.ralphex/config'
+        config.write_text('plan_model = opus:high\nreview_model = sonnet:medium\n')
+        before = config.read_bytes()
+        env = dict(self.env, FAKE_CLAUDE_LOGIN='0', FAKE_MODE='env')
+        (self.repo / 'p.md').write_text('### Task 1: a\n- [ ] a\n')
+        start = self.drive('run', '--plan', 'p.md', '--', '--task-model', 'opus:high', env=env)
+        self.assertEqual(start['executor'], 'codex')
+        self.assertIn('--codex', start['command'])
+        self.assertIn('--task-model=:', start['command'])
+        self.assertNotIn('opus', start['command'])
+        self.until(start['session'], 'done')
+        self.assertEqual(config.read_bytes(), before)
+        decisions = self.drive('report', start['session'])['decisions']
+        self.assertTrue(any('switched this session' in d.get('text', '') for d in decisions))
+
+    def test_claude_disappearing_mid_run_falls_back_once_and_keeps_finished_steps(self):
+        (self.repo / 'p.md').write_text('### Task 1: a\n- [x] done\n- [ ] remaining\n')
+        start = self.drive('run', '--plan', 'p.md', env=dict(self.env, FAKE_MODE='claude-down'))
+        rep = self.until(start['session'], 'done')
+        self.assertEqual(rep['executor'], 'codex')
+        self.assertIn('CODEX-FALLBACK', Path(rep['log']).read_text())
+        self.assertEqual((self.repo / 'p.md').read_text().count('- [x]'), 2)
+        self.assertEqual([r['category'] for r in self.state(start['session'])['restarts']],
+                         ['executor-fallback'])
+
+    def test_planning_falls_back_to_codex_and_stays_plan_only(self):
+        start = self.drive('plan', '--desc', 'add caching',
+                           env=dict(self.env, FAKE_CLAUDE_LOGIN='0',
+                                    AUTOPILOT_TIMEOUTS='question=1,draft=1'))
+        self.assertEqual(start['executor'], 'codex')
+        rep = self.until(start['session'], 'done')
+        self.assertIn('ANSWER-CONTINUE: n', Path(rep['log']).read_text())
+
+    def test_fallback_respects_read_only_codex_and_missing_credentials(self):
+        (self.repo / '.ralphex').mkdir()
+        (self.repo / '.ralphex/config').write_text('codex_sandbox = read-only\n')
+        env = dict(self.env, FAKE_CLAUDE_LOGIN='0')
+        err = self.drive('plan', '--desc', 'cache', env=env)['error']
+        self.assertIn('codex_sandbox is read-only', err)
+        self.assertFalse((Path(self.env['AUTOPILOT_STATE_DIR']) / 'sessions').exists())
+        env = dict(env, FAKE_CODEX_LOGIN='0')
+        env.pop('AUTOPILOT_CODEX_LOGIN_OK')
+        err = self.drive('plan', '--desc', 'cache', env=env)['error']
+        self.assertIn('claude is not logged in', err)
+        self.assertIn('autopilot-setup', err)
+
+    def test_run_fatal_error_stops_without_restart(self):
+        plan = self.repo / 'p.md'
+        plan.write_text('### Task 1: a\n- [ ] a\n')
+        env = dict(self.env, FAKE_FATAL='1')
+        sid = self.drive('run', '--plan', 'p.md', env=env)['session']
+        rep = self.until(sid, 'failed')
+        self.assertEqual(rep['restarts'], 0)
+        self.assertIn('unknown flag', rep['last_error'])
+
+
+class HostPortability(unittest.TestCase):
+    def test_windows_review_skip_restarts_with_an_explicit_review_flag_replaced(self):
+        for flags in (['--external-review-tool=codex'], ['--external-review-tool', 'custom']):
+            with self.subTest(flags=flags), tempfile.TemporaryDirectory() as tmp:
+                directory = Path(tmp)
+                (directory / 'session.json').write_text(json.dumps({
+                    'repo': tmp, 'argv': ['ralphex.exe', 'plan.md', *flags]}))
+                supervisor = autopilot.Supervisor(directory)
+                try:
+                    supervisor.state['skip_external'] = True
+                    supervisor.proc = unittest.mock.Mock(pid=42)
+                    supervisor.proc.poll.return_value = None
+                    with unittest.mock.patch.object(autopilot, 'WINDOWS', True), \
+                            unittest.mock.patch.object(autopilot, 'kill_tree') as kill:
+                        supervisor.break_external_review()
+                    self.assertTrue(supervisor.restart_now)
+                    kill.assert_called_once_with(42)
+                    with unittest.mock.patch.object(autopilot, 'WINDOWS', True), \
+                            unittest.mock.patch.object(autopilot.subprocess, 'CREATE_NEW_PROCESS_GROUP',
+                                                       512, create=True), \
+                            unittest.mock.patch.object(autopilot.subprocess, 'Popen') as spawn, \
+                            unittest.mock.patch.object(autopilot.threading, 'Thread'):
+                        supervisor.spawn()
+                    kwargs = spawn.call_args.kwargs
+                    self.assertEqual(kwargs['args'],
+                                     ['ralphex.exe', 'plan.md', '--external-review-tool=none'])
+                    self.assertEqual(kwargs['env']['AUTOPILOT_PYTHON'], sys.executable)
+                finally:
+                    supervisor.log.close()
+
+    def test_windows_pid_check_uses_the_pid_column(self):
+        with unittest.mock.patch.object(autopilot, 'WINDOWS', True), \
+                unittest.mock.patch.object(autopilot, 'run_quiet') as listing:
+            listing.return_value = (0, '"python.exe","1234","Console","1","123 K"')
+            self.assertFalse(autopilot.pid_alive(123))
+            self.assertTrue(autopilot.pid_alive(1234))
+            listing.return_value = (0, 'INFO: No tasks are running which match the specified criteria.')
+            self.assertFalse(autopilot.pid_alive(1234))
+
+    def test_windows_state_update_retries_a_temporary_reader_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / 'state.json'
+            state.write_text('{"status": "old"}')
+            replace = autopilot.os.replace
+            calls = []
+            def locked_once(source, dest):
+                calls.append(1)
+                if len(calls) == 1:
+                    raise PermissionError('reader holds the old file')
+                return replace(source, dest)
+            with unittest.mock.patch.object(autopilot, 'WINDOWS', True), \
+                    unittest.mock.patch.object(autopilot.os, 'replace', side_effect=locked_once):
+                autopilot.write_json(state, {'status': 'new'})
+            self.assertEqual(json.loads(state.read_text()), {'status': 'new'})
+
+    def test_windows_shims_quote_interpreter_and_use_valid_crlf(self):
+        with tempfile.TemporaryDirectory(prefix='autopilot with spaces ') as tmp:
+            with unittest.mock.patch.object(autopilot, 'WINDOWS', True):
+                bindir = autopilot.write_shims(Path(tmp))
+            for name in ('fzf', 'autopilot-editor'):
+                text = (bindir / f'{name}.cmd').read_bytes()
+                self.assertIn(f'"{sys.executable}" -X utf8'.encode('utf-8'), text)
+                self.assertIn(b'\r\n', text)
+                self.assertNotIn(b'\r\r\n', text)
+
+    def test_windows_batch_clis_and_python_entrypoints(self):
+        with unittest.mock.patch.object(autopilot, 'WINDOWS', True), \
+                unittest.mock.patch.object(autopilot.shutil, 'which', return_value='codex.cmd'):
+            self.assertEqual(autopilot.command_kwargs(['codex', 'login', 'status']),
+                             {'args': ['codex.cmd', 'login', 'status'], 'shell': True})
+        self.assertEqual(autopilot.command_kwargs(['helper.py', 'argument']),
+                         {'args': [sys.executable, 'helper.py', 'argument']})
+
+    def test_host_detection_hints(self):
+        cases = [({'CLAUDECODE': '1'}, 'claude-code'), ({'CODEX_THREAD_ID': 't'}, 'codex'),
+                 ({'GEMINI_CLI': '1'}, 'gemini-cli'), ({'OPENCODE': '1'}, 'opencode'), ({}, 'unknown')]
+        for env, name in cases:
+            with unittest.mock.patch.dict(os.environ, env, clear=True):
+                self.assertEqual(autopilot.detect_host()['name'], name)
+        with unittest.mock.patch.dict(os.environ, {'CODEX_SANDBOX': 'seatbelt',
+                                                   'CODEX_SANDBOX_NETWORK_DISABLED': '1'}, clear=True):
+            host = autopilot.detect_host()
+            self.assertTrue(host['sandboxed'] and host['network_disabled'])
+
+    def test_state_falls_back_into_git_dir_when_user_dir_is_not_writable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(['git', 'init', '-q', tmp], check=True)
+            cwd = os.getcwd()
+            os.chdir(tmp)
+            try:
+                with unittest.mock.patch.dict(os.environ, {'HOME': '/nonexistent-home',
+                                                           'XDG_STATE_HOME': ''}, clear=False), \
+                        unittest.mock.patch.object(autopilot, 'writable', return_value=False):
+                    os.environ.pop('AUTOPILOT_STATE_DIR', None)
+                    root = autopilot.state_root()
+            finally:
+                os.chdir(cwd)
+            self.assertEqual(root.parts[-2:], ('.git', 'autopilot'))
+
+
+class ExecutorSpecs(unittest.TestCase):
+    def test_specs_must_fit_the_executor(self):
+        pinned = {'plan_model': 'opus:high', 'task_model': ':', 'review_model': 'gpt-6.1-sol:max'}
+        codex = autopilot.spec_problems('codex', pinned)
+        self.assertTrue(any(p.startswith('plan_model = opus:high') for p in codex))
+        self.assertTrue(any('review_model = gpt-6.1-sol:max: the runner drops a phase-level "max"' in p
+                            for p in codex))
+        claude = autopilot.spec_problems('claude', pinned)
+        self.assertEqual(len(claude), 1)
+        self.assertTrue(claude[0].startswith('review_model = gpt-6.1-sol:max'))
+        self.assertEqual(autopilot.spec_problems('codex', {'plan_model': ':', 'task_model': ''}), [])
+
+    def test_codex_efforts_follow_the_runner_and_the_catalog(self):
+        # the runner passes "ultra" in a phase spec and a base "max" through to codex
+        ok = {'plan_model': 'gpt-6.1-sol:ultra', 'task_model': ':', 'review_model': ':',
+              'codex_reasoning_effort': 'max'}
+        self.assertEqual(autopilot.spec_problems('codex', ok), [])
+        catalog = {'codex': [{'name': 'gpt-6-luna', 'aliases': 'luna',
+                              'efforts': ['low', 'medium', 'high', 'xhigh', 'max'], 'about': ''},
+                             {'name': 'gpt-6.1-sol', 'aliases': '',
+                              'efforts': ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'], 'about': ''}]}
+        self.assertEqual(autopilot.spec_problems('codex', ok, catalog), [])
+        bad = autopilot.spec_problems('codex', {'task_model': 'luna:ultra', 'plan_model': ':',
+                                                'review_model': ':'}, catalog)
+        self.assertEqual(len(bad), 1)
+        self.assertIn('luna supports efforts low, medium, high, xhigh, max', bad[0])
+        self.assertIn('not "ultra"', bad[0])
+        base = autopilot.spec_problems('codex', {'codex_model': 'gpt-6-luna',
+                                                 'codex_reasoning_effort': 'ultra'}, catalog)
+        self.assertTrue(base and base[0].startswith('codex_reasoning_effort = ultra'))
+        # an unknown or routed model is not judged
+        self.assertEqual(autopilot.spec_problems('codex', {'task_model': ':ultra'}, catalog), [])
+
+
+class RouterCatalog(unittest.TestCase):
+    TEMPLATE = textwrap.dedent('''\
+        # agrouter config (every key shows its default)
+        # [cli.codex]
+        # enabled = true
+        # [model.gpt-6.1-sol]
+        # cli = codex
+        # efforts = low, medium, high, xhigh, max, ultra
+        # [model.gpt-6-luna]
+        # cli = codex
+        # efforts = low, medium, high, xhigh, max
+        # [model.claude-opus-5-5]
+        # cli = claude
+        # aliases = opus
+        # efforts = low, medium, high, max
+        ''')
+
+    def test_partial_override_keeps_the_other_models(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            glob, repo = Path(tmp) / 'global', Path(tmp) / 'repo'
+            glob.mkdir(); (repo / '.agrouter').mkdir(parents=True)
+            (glob / 'config').write_text(self.TEMPLATE + '[model.gpt-6-luna]\nefforts = low, medium\n')
+            (repo / '.agrouter/config').write_text('[model.gpt-6.1-sol]\nenabled = false\n')
+            with unittest.mock.patch.dict(os.environ, {'AGROUTER_CONFIG_DIR': str(glob)}):
+                models, _ = autopilot.router_catalog(str(repo))
+            self.assertEqual([m['name'] for m in models['codex']], ['gpt-6-luna'])
+            self.assertEqual(models['codex'][0]['efforts'], ['low', 'medium'])
+            self.assertEqual([m['name'] for m in models['claude']], ['claude-opus-5-5'])
+
+
+class ResponsePolicy(unittest.TestCase):
+    def test_defaults_and_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / 'config'
+            cfg.write_text('[timeouts]\ndecide = 2h\nquestion = 15m\n')
+            with unittest.mock.patch.dict(os.environ, {'AUTOPILOT_CONFIG': str(cfg),
+                                                       'AUTOPILOT_TIMEOUTS': 'question=never,draft=45m'}):
+                policy = autopilot.load_policy()
+        self.assertEqual(policy['decide']['timeout'], 7200)
+        self.assertEqual(policy['decide']['remind_before'], 900)
+        self.assertIsNone(policy['question']['timeout'])
+        self.assertEqual(policy['draft']['timeout'], 2700)
+        self.assertIsNone(policy['plan_pick']['timeout'])
+        with unittest.mock.patch.dict(os.environ, {'AUTOPILOT_CONFIG': '/nonexistent',
+                                                   'AUTOPILOT_TIMEOUTS': ''}):
+            policy = autopilot.load_policy()
+        self.assertEqual((policy['question']['timeout'], policy['decide']['timeout']), (600, 3600))
+
+    def test_ask_timer_reminds_then_expires_and_cancels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = dict(os.environ, AUTOPILOT_STATE_DIR=tmp,
+                       AUTOPILOT_TIMEOUTS='decide=3,decide.remind=2', AUTOPILOT_CONFIG='/none')
+            def timer(*a):
+                out = subprocess.run([sys.executable, str(DRIVER), 'ask-timer', *a], env=env,
+                                     capture_output=True, text=True, check=True).stdout
+                return json.loads(out)
+            self.assertEqual(timer('start', '--id', 'impl', '--decision', 'decide')['state'], 'pending')
+            self.assertEqual(timer('wait', '--id', 'impl')['state'], 'reminder')
+            self.assertEqual(timer('wait', '--id', 'impl')['state'], 'expired')
+            timer('start', '--id', 'impl2', '--decision', 'decide')
+            timer('cancel', '--id', 'impl2')
+            self.assertEqual(timer('wait', '--id', 'impl2')['state'], 'cancelled')
+            timer('start', '--id', 'pick', '--decision', 'plan_pick')
+            self.assertEqual(timer('wait', '--id', 'pick')['state'], 'never')
+            timer('start', '--id', 'chunk', '--decision', 'decide', '--seconds', '1h')
+            chunk = timer('wait', '--id', 'chunk', '--max', '1')
+            self.assertEqual(chunk['state'], 'pending')
+            self.assertGreater(chunk['left_s'], 3500)
+
+
+class Reconfigure(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name)
+        self.repo, glob = base / 'repo', base / 'global'
+        (self.repo / 'docs/arch').mkdir(parents=True)
+        glob.mkdir()
+        subprocess.run(['git', 'init', '-q'], cwd=self.repo, check=True)
+        for name in ('AGENTS.md', 'README.md', 'docs/arch/a.md', 'docs/arch/b.md'):
+            (self.repo / name).write_text('x')
+        (glob / 'config').write_text('plan_model = opus:high\nwait_on_limit = 15m\n')
+        (self.repo / '.ralphex').mkdir()
+        (self.repo / '.ralphex/config').write_text(
+            'claude_command = agrouter\n'
+            'claude_args = exec claude --doc=AGENTS.md --doc=gone.md -- --verbose --output-format stream-json\n'
+            'task_model = :\nreview_model = opus:\n')
+        self.env = dict(os.environ, RALPHEX_CONFIG_DIR=str(glob), AGROUTER_CONFIG_DIR=str(glob / 'r'),
+                        AUTOPILOT_STATE_DIR=str(base / 'state'), AUTOPILOT_CONFIG='/none')
+
+    def ap(self, *args):
+        res = subprocess.run([sys.executable, str(DRIVER), *args], cwd=self.repo, env=self.env,
+                             capture_output=True, text=True)
+        return json.loads(res.stdout)
+
+    def test_summary_shows_sources_modes_and_issues(self):
+        d = self.ap('config-summary')
+        phases = {k: (v['value'], v['source'], v['mode']) for k, v in d['phases'].items()}
+        self.assertEqual(phases, {'plan_model': ('opus:high', 'global', 'fixed'),
+                                  'task_model': (':', 'local', 'routed'),
+                                  'review_model': ('opus:', 'local', 'model pinned, effort routed')})
+        self.assertEqual(d['limits']['wait_on_limit']['source'], 'global')
+        self.assertEqual(d['docs']['claude_args'], ['AGENTS.md', 'gone.md'])
+        self.assertTrue(any('gone.md' in i for i in d['issues']))
+        self.assertEqual(d['files']['.ralphex/config'], 'untracked')
+
+    def test_unset_returns_to_inherited_value(self):
+        self.ap('config-set', '.ralphex/config', 'plan_model', '--value', ':')
+        self.assertEqual(self.ap('config-summary')['phases']['plan_model']['source'], 'local')
+        self.ap('config-unset', '.ralphex/config', 'plan_model')
+        self.assertEqual(self.ap('config-summary')['phases']['plan_model']['value'], 'opus:high')
+
+    def test_set_docs_preserves_and_refreshes_the_windows_wrapper_pair(self):
+        installed = self.ap('install-wrapper', '--windows', '--docs', 'AGENTS.md')
+        command = installed['codex_command']
+        self.ap('config-set', '.ralphex/config', 'codex_command', '--value', command)
+        self.ap('set-docs', '--docs', 'AGENTS.md', 'README.md', '--doc-dirs', 'docs/arch')
+        wrapper = self.ap('config-summary')['docs']['wrapper']
+        self.assertEqual(wrapper['path'], command)
+        self.assertEqual(wrapper['style'], 'autopilot')
+        self.assertEqual(wrapper['docs'], ['AGENTS.md', 'README.md'])
+        self.assertEqual(wrapper['doc_dirs'], ['docs/arch'])
+
+    def test_set_docs_syncs_claude_args_and_respects_hand_written_wrapper(self):
+        hand = self.repo / '.ralphex/scripts/codex-agrouter.sh'
+        hand.parent.mkdir()
+        hand.write_text('docs=(\n  --doc="$root/AGENTS.md"\n)\nexec agrouter exec codex "${docs[@]}" -- "$@"\n')
+        self.ap('config-set', '.ralphex/config', 'codex_command', '--value', '.ralphex/scripts/codex-agrouter.sh')
+        self.assertEqual(self.ap('config-summary')['docs']['wrapper']['docs'], ['AGENTS.md'])
+        out = self.ap('set-docs', '--docs', 'AGENTS.md', 'README.md', '--doc-dirs', 'docs/arch')
+        self.assertEqual(out['claude_args'], 'exec claude --doc=AGENTS.md --doc=README.md '
+                         '--doc=docs/arch/a.md --doc=docs/arch/b.md -- --verbose --output-format stream-json')
+        self.assertIn('hand-written', out['wrapper'])
+        self.assertIn('--doc="$root/AGENTS.md"', hand.read_text())
+        self.ap('set-docs', '--docs', 'AGENTS.md', 'README.md', '--doc-dirs', 'docs/arch', '--replace-wrapper')
+        w = self.ap('config-summary')['docs']['wrapper']
+        self.assertEqual((w['style'], w['docs'], w['doc_dirs']),
+                         ('autopilot', ['AGENTS.md', 'README.md'], ['docs/arch']))
+        self.assertEqual(self.ap('config-summary')['issues'], [])
+        self.assertIn('error', self.ap('set-docs', '--docs', 'nope.md'))
+
+    def test_set_docs_quotes_paths_the_way_the_runner_splits_them(self):
+        (self.repo / 'docs/design notes').mkdir()
+        (self.repo / 'docs/design notes/overview.md').write_text('x')
+        out = self.ap('set-docs', '--docs', 'AGENTS.md', '--doc-dirs', 'docs/design notes')
+        self.assertIn('--doc="docs/design notes/overview.md"', out['claude_args'])
+        self.assertEqual(runner_split(out['claude_args'].split(' -- ')[0]),
+                         ['exec', 'claude', '--doc=AGENTS.md', '--doc=docs/design notes/overview.md'])
+        self.assertEqual(self.ap('config-summary')['docs']['claude_args'],
+                         ['AGENTS.md', 'docs/design notes/overview.md'])
+        # a second run replaces the quoted entry instead of keeping half of it
+        again = self.ap('set-docs', '--docs', 'AGENTS.md', '--doc-dirs', 'docs/design notes')
+        self.assertEqual(again['claude_args'], out['claude_args'])
+
+
+class CheckPlan(unittest.TestCase):
+    GOOD = """# Plan: cache
+## Overview
+Add a cache.
+## Validation Commands
+- `go test ./...`
+### Task 1: Add store
+- [x] write store
+- [ ] add tests
+### Task 2.5: Wire it
+- [ ] wire
+- [ ] run tests
+```markdown
+### Task 9: example inside a fence
+- [ ] not a real box
+```
+"""
+
+    def check(self, text):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'plan.md'
+            path.write_text(text)
+            return autopilot.check_plan(path)
+
+    def test_ready_plan_mirrors_runner_parser(self):
+        r = self.check(self.GOOD)
+        self.assertEqual((r['verdict'], r['status']), ('ready', 'in progress'))
+        self.assertEqual([t['id'] for t in r['tasks']], ['1', '2.5'])
+        self.assertEqual(r['checkboxes'], {'total': 4, 'done': 1})
+
+    def test_complete_plan(self):
+        r = self.check(self.GOOD.replace('- [ ]', '- [x]'))
+        self.assertEqual(r['status'], 'complete')
+
+    def test_redesign_cases(self):
+        cases = {
+            '# Design\n## 1. Decision\nWe will cache.\n## 2. Risks\nNone.\n': 'design or notes',
+            '# Plan\n## Task 1: Store\n- [ ] a\n': 'do not use the runner',
+            '# План\n### Задача 1: Хранилище\n- [ ] a\n': 'do not use the runner',
+            '# Plan\n### Step 1 - store\n- [ ] a\n': 'do not use the runner',
+            '# Plan\n### Task 1: Store\nJust prose.\n': 'without checkboxes',
+        }
+        for text, needle in cases.items():
+            with self.subTest(text=text[:25]):
+                r = self.check(text)
+                self.assertEqual(r['verdict'], 'redesign')
+                self.assertTrue(any(needle in p for p in r['problems']), r['problems'])
+
+    def test_warnings_keep_the_plan_runnable(self):
+        text = ('# Plan\n## Success criteria\n- [ ] fast\n### Task 1: Store\n- [ ] a\n'
+                + '\n'.join('- [ ] step %d' % i for i in range(13)) + '\n')
+        r = self.check(text)
+        self.assertEqual(r['verdict'], 'warnings')
+        joined = ' '.join(r['warnings'])
+        self.assertIn('outside task sections', joined)
+        self.assertIn('Validation Commands', joined)
+        self.assertIn('very large tasks', joined)
+
+    def test_missing_file(self):
+        self.assertEqual(autopilot.check_plan('/nonexistent/plan.md')['verdict'], 'redesign')
+
+
+class PlanRevision(unittest.TestCase):
+    PLAN = '# Plan\n## Validation Commands\n- `make test`\n### Task 1: Store\n- [x] write\n- [ ] test it\n'
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name) / 'repo'
+        (self.repo / 'docs/plans').mkdir(parents=True)
+        subprocess.run(['git', 'init', '-q'], cwd=self.repo, check=True)
+        self.plan = self.repo / 'docs/plans/p.md'
+        self.plan.write_text(self.PLAN)
+        self.env = dict(os.environ, AUTOPILOT_STATE_DIR=str(Path(self.tmp.name) / 'state'))
+
+    def ap(self, *args):
+        res = subprocess.run([sys.executable, str(DRIVER), *args], cwd=self.repo, env=self.env,
+                             capture_output=True, text=True)
+        return json.loads(res.stdout)
+
+    def test_snapshot_edit_diff(self):
+        self.assertIn('error', self.ap('plan-rev', 'diff', 'docs/plans/p.md'))
+        self.assertEqual(self.ap('plan-rev', 'snapshot', 'docs/plans/p.md')['revision'], 1)
+        self.plan.write_text(self.PLAN + '### Task 2: Cache\n- [ ] add cache\n- [ ] test cache\n')
+        d = self.ap('plan-rev', 'diff', 'docs/plans/p.md')
+        self.assertTrue(d['changed'])
+        self.assertEqual((d['tasks_before'], d['tasks_after'], d['added'], d['removed']), (1, 2, 3, 0))
+        self.assertEqual(d['checked_boxes_lost'], 0)
+        self.assertEqual(d['check']['verdict'], 'ready')
+
+    def test_lost_progress_is_reported(self):
+        self.ap('plan-rev', 'snapshot', 'docs/plans/p.md')
+        self.plan.write_text(self.PLAN.replace('- [x] write', '- [ ] write'))
+        self.assertEqual(self.ap('plan-rev', 'diff', 'docs/plans/p.md')['checked_boxes_lost'], 1)
+
+    def test_supersede_keeps_a_backup(self):
+        new = self.repo / 'docs/plans/p2.md'
+        new.write_text(self.PLAN)
+        out = self.ap('plan-rev', 'supersede', 'docs/plans/p.md', '--by', 'docs/plans/p2.md')
+        self.assertFalse(self.plan.exists())
+        self.assertEqual(Path(out['backup']).read_text(), self.PLAN)
+        self.assertIn('not committed', out['how'])
+        # a committed plan is removed with git rm
+        self.plan.write_text(self.PLAN)
+        subprocess.run(['git', 'add', 'docs/plans/p.md'], cwd=self.repo, check=True)
+        subprocess.run(['git', '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'p'],
+                       cwd=self.repo, check=True)
+        out = self.ap('plan-rev', 'supersede', 'docs/plans/p.md', '--by', 'docs/plans/p2.md')
+        self.assertIn('git rm', out['how'])
+        self.assertFalse(self.plan.exists())
+
+    def test_replan_round_diffs_old_against_new(self):
+        # the documented round: snapshot old, re-plan into a new file, supersede, diff the new one
+        self.ap('plan-rev', 'snapshot', 'docs/plans/p.md')
+        new = self.repo / 'docs/plans/p2.md'
+        new.write_text(self.PLAN + '### Task 2: Cache\n- [ ] add cache\n- [ ] test cache\n')
+        self.ap('plan-rev', 'supersede', 'docs/plans/p.md', '--by', 'docs/plans/p2.md')
+        d = self.ap('plan-rev', 'diff', 'docs/plans/p2.md')
+        self.assertTrue(d['changed'])
+        self.assertEqual((d['tasks_before'], d['tasks_after'], d['added']), (1, 2, 3))
+
+
+class ReviewPlan(unittest.TestCase):
+    def test_claude_plan_review_uses_the_actual_codex_executor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            repo, fakebin = base / 'repo', base / 'bin'
+            repo.mkdir(); fakebin.mkdir()
+            subprocess.run(['git', 'init', '-q'], cwd=repo, check=True)
+            (repo / 'plan.md').write_text('### Task 1: a\n- [ ] test it\n')
+            python_tool(fakebin / 'claude', textwrap.dedent('''\
+                import json, sys
+                from pathlib import Path
+                if 'auth' in sys.argv:
+                    print(json.dumps({'loggedIn': True}))
+                else:
+                    Path('review-args.json').write_text(json.dumps(sys.argv[1:]))
+                    Path('review-prompt.txt').write_text(sys.stdin.read())
+                    print('No findings.')
+                '''))
+            cfg = base / 'autopilot.cfg'
+            cfg.write_text('[review]\nplan = auto\n')
+            env = dict(os.environ, PATH=f"{fakebin}{os.pathsep}{os.environ['PATH']}",
+                       AUTOPILOT_CONFIG=str(cfg), AUTOPILOT_STATE_DIR=str(base / 'state'),
+                       RALPHEX_CONFIG_DIR=str(base / 'none'), AGROUTER_CONFIG_DIR=str(base / 'none'))
+            res = subprocess.run([sys.executable, str(DRIVER), 'review-plan', 'plan.md',
+                                  '--executor', 'codex'], cwd=repo, env=env,
+                                 capture_output=True, text=True, check=True)
+            out = json.loads(res.stdout)
+            self.assertEqual(out['reviewer'], 'claude')
+            self.assertTrue(out['ok'])
+            self.assertTrue(out['no_findings'])
+            self.assertEqual(json.loads((repo / 'review-args.json').read_text()),
+                             ['-p', '--permission-mode', 'plan'])
+            self.assertIn('### Task 1:', (repo / 'review-prompt.txt').read_text())
+
+    def test_cross_model_plan_review_through_fake_codex(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            repo, fakebin = base / 'repo', base / 'bin'
+            repo.mkdir(); fakebin.mkdir()
+            subprocess.run(['git', 'init', '-q'], cwd=repo, check=True)
+            (repo / 'plan.md').write_text('### Task 1: a\n- [ ] a\n')
+            python_tool(fakebin / 'codex', textwrap.dedent('''\
+                import sys
+                from pathlib import Path
+                if '--version' in sys.argv:
+                    print('codex-cli 0.169.0'); sys.exit(0)
+                if 'login' in sys.argv:
+                    sys.exit(0)
+                Path(__file__).with_name('prompt.txt').write_text(sys.stdin.read(), encoding='utf-8')
+                print('args: ' + ' '.join(sys.argv[1:]))
+                print('- [high] Task 1 has no test step -> add one')
+                '''))
+            cfg = base / 'autopilot.cfg'
+            cfg.write_text('[review]\nplan = auto\n')
+            env = dict(os.environ, PATH=f"{fakebin}{os.pathsep}{os.environ['PATH']}",
+                       AUTOPILOT_CONFIG=str(cfg), AUTOPILOT_STATE_DIR=str(base / 'state'),
+                       RALPHEX_CONFIG_DIR=str(base / 'none'), AGROUTER_CONFIG_DIR=str(base / 'none'))
+            res = subprocess.run([sys.executable, str(DRIVER), 'review-plan', 'plan.md',
+                                  '--task', 'add caching'], cwd=repo, env=env,
+                                 capture_output=True, text=True)
+            out = json.loads(res.stdout)
+            self.assertEqual(out['reviewer'], 'codex')
+            self.assertEqual(out['findings'], ['- [high] Task 1 has no test step -> add one'])
+            self.assertIn('args: exec --sandbox read-only', Path(out['file']).read_text())
+            prompt = (fakebin / 'prompt.txt').read_text()
+            self.assertIn('Task: add caching', prompt)
+            self.assertIn('### Task 1: a', prompt)
+
+
+class ClaudeAvailability(unittest.TestCase):
+    def test_missing_disabled_logged_out_unverified_and_usable(self):
+        with unittest.mock.patch.object(autopilot.shutil, 'which', return_value=None):
+            self.assertEqual(autopilot.claude_status(), (False, 'claude is not installed'))
+        with unittest.mock.patch.object(autopilot.shutil, 'which', return_value='/bin/claude'), \
+                unittest.mock.patch.object(autopilot, 'run_quiet') as auth:
+            ok, reason = autopilot.claude_status({'cli.claude': {'enabled': 'false'}})
+            self.assertFalse(ok)
+            self.assertIn('disabled for routing', reason)
+            auth.assert_not_called()
+            for result, expected in [((0, '{"loggedIn": true}'), None),
+                                     ((0, '{"loggedIn": false}'), 'not logged in'),
+                                     ((1, '{"loggedIn": true}'), 'not logged in'),
+                                     ((None, 'timeout'), 'could not be checked'),
+                                     ((0, '[]'), 'not logged in')]:
+                with self.subTest(result=result):
+                    auth.return_value = result
+                    ok, reason = autopilot.claude_status()
+                    self.assertEqual(ok, expected is None)
+                    if expected:
+                        self.assertIn(expected, reason)
+            auth.assert_called_with(['/bin/claude', 'auth', 'status', '--json'], timeout=20)
+
+    def test_fallback_keeps_routing_and_requires_existing_codex_command(self):
+        with tempfile.TemporaryDirectory() as repo, \
+                unittest.mock.patch.object(autopilot.shutil, 'which', return_value='/bin/codex'):
+            reason = autopilot.codex_fallback_blocker(repo, {'claude_command': 'agrouter'})
+            self.assertIn('routing wrapper', reason)
+            self.assertIsNone(autopilot.codex_fallback_blocker(repo, {}))
+        with unittest.mock.patch.object(autopilot.shutil, 'which', return_value=None):
+            self.assertIn('codex_command is missing',
+                          autopilot.codex_fallback_blocker('/none', {'codex_command': 'missing'}))
+
+    def test_fallback_preserves_explicit_external_review_requests(self):
+        for flags in (['--external-only'], ['-c'], ['--external-review-tool=codex'],
+                      ['--external-review-tool', 'custom']):
+            with self.subTest(flags=flags):
+                self.assertIn('requires Claude', autopilot.codex_fallback_blocker('/none', {}, flags))
+        with unittest.mock.patch.object(autopilot.shutil, 'which', return_value='/bin/codex'):
+            self.assertIsNone(autopilot.codex_fallback_blocker(
+                '/none', {}, ['--external-review-tool=none']))
+
+
+class WrapperInstall(unittest.TestCase):
+    def test_windows_pair_routes_docs_arguments_stdin_and_exit_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, fakebin = Path(tmp) / 'repo with spaces', Path(tmp) / 'bin'
+            repo.mkdir(); fakebin.mkdir()
+            (repo / 'docs/design notes').mkdir(parents=True)
+            names = ["Agent's Guide.md", 'docs/design notes/架构.md']
+            for name in names:
+                (repo / name).write_text('document', encoding='utf-8')
+            python_tool(fakebin / 'agrouter', textwrap.dedent('''\
+                import json, os, sys
+                print(json.dumps({'args': sys.argv[1:], 'prompt': sys.stdin.read()}))
+                sys.exit(int(os.environ.get('FAKE_ROUTER_EXIT', '0')))
+                '''))
+            env = dict(os.environ, PATH=str(fakebin) + os.pathsep + os.environ['PATH'], PYTHONUTF8='1')
+            result = subprocess.run([sys.executable, str(DRIVER), 'install-wrapper', '--windows',
+                                     '--docs', names[0], '--doc-dirs', 'docs/design notes'],
+                                    cwd=repo, env=env, capture_output=True, text=True,
+                                    encoding='utf-8', check=True)
+            command = json.loads(result.stdout)['codex_command']
+            self.assertEqual(command, '.ralphex/scripts/codex-agrouter.cmd')
+            launcher = (repo / command).read_bytes()
+            self.assertNotIn(sys.executable.encode('utf-8'), launcher)
+            self.assertIn(b'py -3 -X utf8', launcher)
+            self.assertNotIn(b'__PYTHON__', launcher)
+            self.assertNotIn(b'\r\r\n', launcher)
+            wrapper = autopilot.parse_wrapper(str(repo), command)
+            self.assertEqual(wrapper['style'], 'autopilot')
+            self.assertTrue(wrapper['routes'])
+            self.assertEqual(wrapper['docs'], names[:1])
+            self.assertEqual(wrapper['doc_dirs'], ['docs/design notes'])
+            payload = (repo / command).with_suffix('.py')
+            # Exercise the actual CMD launcher on Windows, its Python payload elsewhere.
+            argv = [str(repo / command)] if os.name == 'nt' else [sys.executable, str(payload)]
+            flags = ['exec', '-c', 'model="x y"', '--json']
+            prompt = 'Review the plan: שלום 世界\n'
+            for exit_code in (0, 7):
+                run_env = dict(env, FAKE_ROUTER_EXIT=str(exit_code))
+                if exit_code:
+                    run_env['AUTOPILOT_PYTHON'] = sys.executable
+                res = subprocess.run(argv + flags, shell=os.name == 'nt', cwd=repo,
+                                     env=run_env, input=prompt,
+                                     capture_output=True, text=True, encoding='utf-8')
+                self.assertEqual(res.returncode, exit_code, res.stderr)
+                captured = json.loads(res.stdout)
+                self.assertEqual(captured['args'], ['exec', 'codex',
+                    *[f'--doc={repo.resolve() / name}' for name in names], '--', *flags[1:]])
+                self.assertEqual(captured['prompt'], prompt)
+            with unittest.mock.patch.object(autopilot, 'WINDOWS', True):
+                self.assertEqual(autopilot.command_kwargs([str(repo / command), *flags]),
+                                 {'args': [sys.executable, str(payload), *flags]})
+
+    def run_wrapper(self, docs, doc_dirs, extra=()):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, fakebin = Path(tmp) / 'repo', Path(tmp) / 'bin'
+            (repo / 'docs/arch').mkdir(parents=True)
+            fakebin.mkdir()
+            for name in ('AGENTS.md', 'docs/arch/a.md', 'docs/arch/b.md', *extra):
+                (repo / name).parent.mkdir(parents=True, exist_ok=True)
+                (repo / name).write_text('x')
+            fake = fakebin / 'agrouter'
+            fake.write_text('#!/bin/sh\nfor a in "$@"; do printf "%s\\n" "$a"; done\n')
+            fake.chmod(0o755)
+            res = subprocess.run([sys.executable, str(DRIVER), 'install-wrapper', '--docs', *docs,
+                                  '--doc-dirs', *doc_dirs], cwd=repo, capture_output=True,
+                                 text=True, check=True)
+            cmd = json.loads(res.stdout)['codex_command']
+            self.parsed = autopilot.parse_wrapper(str(repo), cmd)
+            env = dict(os.environ, PATH=f"{fakebin}{os.pathsep}{os.environ['PATH']}")
+            out = subprocess.run(['/bin/bash', str(repo / cmd), 'exec', '-c', 'model="x y"', '--json'],
+                                 cwd=repo, env=env, capture_output=True, text=True)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            roots = (str(repo.resolve()), str(repo))
+            return [l.replace(roots[0], 'ROOT').replace(roots[1], 'ROOT')
+                    for l in out.stdout.splitlines()]
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX wrapper')
+    def test_docs_and_globbed_dirs_reach_router_before_native_args(self):
+        self.assertEqual(self.run_wrapper(['AGENTS.md'], ['docs/arch']), [
+            'exec', 'codex', '--doc=ROOT/AGENTS.md', '--doc=ROOT/docs/arch/a.md',
+            '--doc=ROOT/docs/arch/b.md', '--', '-c', 'model="x y"', '--json'])
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX wrapper')
+    def test_shell_characters_in_file_names_stay_literal(self):
+        names = ['docs/$schema.md', "docs/it's `here`.md"]
+        self.assertEqual(self.run_wrapper(names, ["docs/$dir's"], extra=["docs/$dir's/c.md"]), [
+            'exec', 'codex', '--doc=ROOT/docs/$schema.md', "--doc=ROOT/docs/it's `here`.md",
+            "--doc=ROOT/docs/$dir's/c.md", '--', '-c', 'model="x y"', '--json'])
+        self.assertEqual((self.parsed['docs'], self.parsed['doc_dirs']),
+                         (sorted(names), ["docs/$dir's"]))
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX wrapper')
+    def test_no_docs_works_on_old_bash(self):
+        self.assertEqual(self.run_wrapper([], []),
+                         ['exec', 'codex', '--', '-c', 'model="x y"', '--json'])
+
+
+class DocDrift(unittest.TestCase):
+    def test_reports_missing_and_unlisted_docs_for_both_wrapper_styles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'docs/arch').mkdir(parents=True)
+            for name in ('AGENTS.md', 'docs/arch/a.md', 'docs/arch/new.md'):
+                (root / name).write_text('x')
+            args = 'exec claude --doc=AGENTS.md --doc=docs/arch/a.md --doc=gone.md -- --verbose'
+            for wrapper in ('docs=()\ndoc_dirs=(\n  "docs/arch"\n)\n',
+                            'for doc in "$root"/docs/arch/*.md; do\n'):
+                (root / 'w.sh').write_text(wrapper)
+                self.assertEqual(autopilot.doc_drift(str(root), args, 'w.sh'),
+                                 {'missing': ['gone.md'], 'unlisted': ['docs/arch/new.md']})
+            synced = 'exec claude --doc=AGENTS.md --doc=docs/arch/a.md --doc=docs/arch/new.md --'
+            self.assertIsNone(autopilot.doc_drift(str(root), synced, 'w.sh'))
+
+
+class IniEditing(unittest.TestCase):
+    TEMPLATE = textwrap.dedent('''\
+        # [agrouter]
+        # classifier_provider = typesafe
+
+        # [classifier.typesafe]
+        # url = https://example.test
+        # api_key =
+
+        # [classifier.openai]
+        # api_key =
+    ''')
+
+    def test_uncomments_template_section_and_key(self):
+        out = autopilot.ini_set(self.TEMPLATE, 'api_key', 'K1', 'classifier.typesafe')
+        self.assertIn('[classifier.typesafe]\n# url = https://example.test\napi_key = K1', out)
+        self.assertIn('# [classifier.openai]\n# api_key =', out)
+
+    def test_replaces_active_key_and_appends_missing(self):
+        text = '[agrouter]\ntimeout = 10s\n\n[cli.codex]\nenabled = true\n'
+        out = autopilot.ini_set(text, 'timeout', '30s', 'agrouter')
+        out = autopilot.ini_set(out, 'classifier_provider', 'openai', 'agrouter')
+        self.assertIn('[agrouter]\ntimeout = 30s\nclassifier_provider = openai\n', out)
+        out = autopilot.ini_set(out, 'api_key', 'K', 'classifier.openai')
+        self.assertTrue(out.endswith('[classifier.openai]\napi_key = K\n'))
+
+    def test_flat_file_without_sections(self):
+        text = 'claude_command = claude\n# task_model =\n'
+        out = autopilot.ini_set(text, 'task_model', 'opus:', None)
+        out = autopilot.ini_set(out, 'claude_command', 'agrouter', None)
+        self.assertEqual(out, 'claude_command = agrouter\ntask_model = opus:\n')
+
+    def test_empty_value_has_no_trailing_space(self):
+        out = autopilot.ini_set('# codex_model = gpt\n', 'codex_model', '', None)
+        self.assertEqual(out, 'codex_model =\n')
+
+    def test_comment_above_key_once(self):
+        out = autopilot.ini_set('# task_model =\n', 'task_model', ':', None, 'routed by the classifier')
+        out = autopilot.ini_set(out, 'task_model', ':', None, 'routed by the classifier')
+        self.assertEqual(out, '# routed by the classifier\ntask_model = :\n')
+
+    def test_template_copy_overrides_nothing_until_set(self):
+        text = '# note\ncolor_task = #2e8b57\n# task_model =\n[sec]\nk = v\n'
+        out = autopilot.comment_out_values(text)
+        self.assertEqual(out, '# note\n# color_task = #2e8b57\n# task_model =\n[sec]\n# k = v\n')
+        self.assertEqual(list(autopilot.ini_active(out)), [])
+
+    def test_redaction(self):
+        self.assertEqual(autopilot.redact('api_key', 'abc'), '<set>')
+        self.assertEqual(autopilot.redact('notify_telegram_token', 'abc'), '<set>')
+        self.assertEqual(autopilot.redact('task_model', 'opus'), 'opus')
+        self.assertEqual(autopilot.redact('bytes_per_token', '2.5'), '2.5')
+        self.assertEqual(autopilot.redact('request_tokens', '128000'), '128000')
+
+
+if __name__ == '__main__':
+    unittest.main()
+
+
+DRAFT_MENU = ('\n━━━ Plan Draft ━━━\n# Plan: cache\n### Task 1: add\n- [ ] do it\n━━━━━━━━━━\n'
+              'Review the plan draft\n  1) Accept\n  2) Revise\n  3) Interactive review\n'
+              '  4) Reject\nEnter number (1-4): ')
+
+
+class FakeProc:
+    def __init__(self, rc=0):
+        self.pid, self.rc = 0, rc
+        self.stdin = unittest.mock.MagicMock()
+        self.stdout = unittest.mock.MagicMock()
+        self.returncode = rc
+
+    def poll(self):
+        return self.rc
+
+
+class SupervisorUnits(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.sdir = Path(self.tmp.name)
+        (self.sdir / 'inbox').mkdir()
+        autopilot.write_json(self.sdir / 'session.json', {
+            'kind': 'plan', 'target': 'add caching', 'repo': self.tmp.name,
+            'argv': ['ralphex', '--plan', 'add caching'], 'policy': autopilot.load_policy()})
+        self.sup = autopilot.Supervisor(self.sdir)
+        self.addCleanup(self.sup.log.close)
+
+    def test_polling_keeps_edits_until_a_new_draft_is_printed(self):
+        self.sup.buf = DRAFT_MENU
+        prompt = self.sup.detect_prompt()
+        edited = Path(prompt['edited_file'])
+        self.assertIn('# Plan: cache', edited.read_text())
+        edited.write_text('MY USER EDIT\n')
+        for _ in range(3):
+            self.sup.detect_prompt()
+        self.assertEqual(edited.read_text(), 'MY USER EDIT\n')
+        # a revision prints the draft again: that one gets a fresh editable copy
+        self.sup.buf += '2\nEnter revision feedback: x\n' + DRAFT_MENU
+        self.sup.detect_prompt()
+        self.assertIn('# Plan: cache', edited.read_text())
+
+    def test_lines_split_across_reads_are_scanned_whole(self):
+        self.sup.state['skip_external'] = True
+        self.sup.proc = FakeProc(rc=None)
+        chunks = [b'--- codex it', b'eration 1 ---\nagrouter: selection: {"cli":"codex",',
+                  b'"model":"gpt-6.1-sol","effort":"high"}\n', b'tail without newline', b'']
+        with unittest.mock.patch.object(autopilot.os, 'read', side_effect=chunks), \
+                unittest.mock.patch.object(self.sup, 'break_external_review') as brk:
+            self.sup.reader()
+        self.assertEqual(self.sup.state['phase'], 'external review')
+        brk.assert_called_once()
+        self.assertEqual(self.sup.state['model'],
+                         {'cli': 'codex', 'model': 'gpt-6.1-sol', 'effort': 'high'})
+
+    def test_a_restart_drops_the_open_prompt_and_its_recommendation(self):
+        choice = {'kind': 'choice', 'question': 'Pick', 'options': ['A', 'B'], 'free_text': False}
+        self.sup.handle_prompt(dict(choice))
+        old = self.sup.state['waiting']
+        autopilot.write_json(self.sdir / 'recommend.json', {
+            'prompt_id': old['id'], 'send': '1\n', 'summary': 'A', 'reason': 'old'})
+        self.sup.spawn = lambda: setattr(self.sup, 'proc', FakeProc(rc=1))
+        self.sup.attempt()
+        self.assertIsNone(self.sup.state['waiting'])
+        self.assertIn('prompt-dropped', [e['kind'] for e in self.sup.state['events']])
+        # the restarted runner asks the same question: it is a new prompt, open for answers
+        self.sup.handle_prompt(dict(choice))
+        new = self.sup.state['waiting']
+        self.assertEqual(self.sup.state['status'], 'waiting')
+        self.assertGreater(new['id'], old['id'])
+        # the old recommendation is not sent into the new process when the deadline passes
+        new['deadline'] = autopilot.now() - 1
+        self.sup.proc = FakeProc(rc=None)
+        self.sup.check_deadline()
+        answered = [e for e in self.sup.state['events'] if e['kind'] == 'auto-answered']
+        self.assertEqual(len(answered), 1)
+        self.assertNotIn('recommended option', answered[0]['reason'])  # the safe default, not 'old'
+
+
+def git(cwd, *args):
+    subprocess.run(['git', '-c', 'user.email=t@t', '-c', 'user.name=t', *args], cwd=cwd,
+                   check=True, capture_output=True)
+
+
+class WorktreeResume(unittest.TestCase):
+    PLAN = '# Plan\n### Task 1: a\n- [ ] one\n### Task 2: b\n- [ ] two\n'
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name)
+        self.repo = base / 'repo'
+        self.repo.mkdir()
+        git(self.repo, 'init', '-q', '-b', 'master')
+        (self.repo / 'README.md').write_text('x')
+        git(self.repo, 'add', 'README.md')
+        git(self.repo, 'commit', '-qm', 'init')
+        # the source plan stays untracked on master, as after planning
+        (self.repo / 'docs/plans').mkdir(parents=True)
+        (self.repo / 'docs/plans/2026-11-14-cache.md').write_text(self.PLAN)
+        self.sdir = base / 'session'
+        (self.sdir / 'inbox').mkdir(parents=True)
+        self.env = unittest.mock.patch.dict(os.environ, {
+            'RALPHEX_CONFIG_DIR': str(base / 'no-global')})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def supervisor(self, *flags):
+        target = 'docs/plans/2026-11-14-cache.md'
+        autopilot.write_json(self.sdir / 'session.json', {
+            'kind': 'run', 'target': target, 'repo': str(self.repo),
+            'argv': ['ralphex', '--no-color', target, *flags]})
+        sup = autopilot.Supervisor(self.sdir)
+        self.addCleanup(sup.log.close)
+        return sup
+
+    def make_branch_with_progress(self):
+        """What a first --worktree attempt leaves: the branch with Task 1 ticked."""
+        wt = self.repo / '.ralphex/worktrees/cache'
+        git(self.repo, 'worktree', 'add', '-q', '-b', 'cache', str(wt))
+        (wt / 'docs/plans').mkdir(parents=True)
+        (wt / 'docs/plans/2026-11-14-cache.md').write_text(self.PLAN.replace('- [ ] one', '- [x] one'))
+        git(wt, 'add', '-A')
+        git(wt, 'commit', '-qm', 'task 1')
+        git(self.repo, 'worktree', 'remove', str(wt))  # the runner removes it when it exits
+
+    def test_first_start_uses_the_runner_worktree(self):
+        cwd, argv = self.supervisor('--worktree').launch()
+        self.assertEqual((cwd, argv[-1]), (str(self.repo), '--worktree'))
+
+    def test_restart_continues_the_branch_without_resetting_ticks(self):
+        self.make_branch_with_progress()
+        sup = self.supervisor('--worktree', '--wait=900s')
+        cwd, argv = sup.launch()
+        wt = self.repo / '.ralphex/worktrees/cache'
+        self.assertEqual(cwd, str(wt))
+        self.assertEqual(argv, ['ralphex', '--no-color', 'docs/plans/2026-11-14-cache.md', '--wait=900s'])
+        self.assertIn('- [x] one', (wt / 'docs/plans/2026-11-14-cache.md').read_text())
+        self.assertEqual(sup.plan_progress()['done'], 1)
+        # the existing worktree is reused on the next restart
+        self.assertEqual(sup.launch()[0], str(wt))
+
+    def test_configured_worktree_mode_refuses_to_restart(self):
+        self.make_branch_with_progress()
+        (self.repo / '.ralphex').mkdir(exist_ok=True)
+        (self.repo / '.ralphex/config').write_text('use_worktree = true\n')
+        with self.assertRaises(autopilot.ResumeBlocked):
+            self.supervisor().launch()
+
+
+class ExecutionChecks(unittest.TestCase):
+    def capability(self, repo, cfg, router=''):
+        rdir = Path(repo) / 'router'
+        rdir.mkdir(exist_ok=True)
+        (rdir / 'config').write_text(router)
+        with unittest.mock.patch.dict(os.environ, {'AGROUTER_CONFIG_DIR': str(rdir),
+                                                   'AUTOPILOT_CODEX_LOGIN_OK': '1'}), \
+                unittest.mock.patch.object(autopilot, 'tool_info',
+                                           return_value={'version': 'codex-cli 0.169.0'}), \
+                unittest.mock.patch.object(autopilot, 'claude_status', return_value=(True, None)), \
+                unittest.mock.patch.object(autopilot.shutil, 'which',
+                                           side_effect=lambda n: '/bin/codex' if n == 'codex' else None):
+            return autopilot.review_capability(repo, cfg)['execution']
+
+    def test_codex_executor_needs_a_runnable_command_and_a_writable_sandbox(self):
+        with tempfile.TemporaryDirectory() as repo:
+            base = {'executor': 'codex', 'plan_model': ':', 'task_model': ':', 'review_model': ':'}
+            missing = self.capability(repo, dict(base, codex_command='.ralphex/scripts/missing.sh'))
+            self.assertFalse(missing['usable'])
+            self.assertIn('codex_command is missing', missing['reason'])
+            readonly = self.capability(repo, dict(base, codex_sandbox='read-only'))
+            self.assertFalse(readonly['usable'])
+            self.assertIn('read-only', readonly['reason'])
+            self.assertTrue(self.capability(repo, dict(base, codex_command='codex'))['usable'])
+
+    def test_routing_switch_only_applies_to_routed_use(self):
+        disabled = '[cli.codex]\nenabled = false\n'
+        with tempfile.TemporaryDirectory() as repo:
+            direct = {'executor': 'codex', 'codex_command': 'codex', 'task_model': 'gpt-6.1-sol:high'}
+            self.assertTrue(self.capability(repo, direct, disabled)['usable'])
+            wrapper = Path(repo) / '.ralphex/scripts/codex-agrouter.sh'
+            wrapper.parent.mkdir(parents=True)
+            wrapper.write_text('# autopilot-wrapper\nexec agrouter exec codex -- "$@"\n')
+            wrapper.chmod(0o755)
+            routed = dict(direct, codex_command='.ralphex/scripts/codex-agrouter.sh')
+            blocked = self.capability(repo, routed, disabled)
+            self.assertFalse(blocked['usable'])
+            self.assertIn('disabled for routing', blocked['reason'])

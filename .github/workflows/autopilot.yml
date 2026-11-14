@@ -1,0 +1,36 @@
+name: Autopilot scripts
+
+on:
+  push:
+    paths:
+      - 'autopilot/**'
+      - 'tests/test_autopilot.py'
+      - '.github/workflows/autopilot.yml'
+  pull_request:
+    paths:
+      - 'autopilot/**'
+      - 'tests/test_autopilot.py'
+      - '.github/workflows/autopilot.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scripts:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.11', '3.13']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python scripts/validate_plugins.py
+      - run: python -m unittest discover -s tests -p test_autopilot.py
