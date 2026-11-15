@@ -160,6 +160,46 @@ FAKE = textwrap.dedent('''\
         out('--- claude evaluating codex findings ---')
         time.sleep(1.5)
         sys.exit(0)
+    if mode == 'milestones':
+        import time
+        plan = Path(args[0])
+        def done(*boxes):
+            text = plan.read_text()
+            for b in boxes:
+                text = text.replace('- [ ] ' + b, '- [x] ' + b)
+            plan.write_text(text)
+        def commit(msg):
+            subprocess.run(['git', 'add', '-A'], check=True, capture_output=True)
+            subprocess.run(['git', 'commit', '-q', '-m', msg], check=True, capture_output=True)
+        out('--- task iteration 1 ---')
+        # the real runner prints the selection header and its JSON on separate lines
+        out('[26-01-01 10:00:00] agrouter: selection:')
+        out('[26-01-01 10:00:00] {"cli":"claude","model":"claude-opus-5-5","effort":"xhigh"}')
+        time.sleep(1.2); done('a', 'b'); commit('Task 1: one'); time.sleep(1.5)
+        out('--- task iteration 2 ---')
+        # routing fails: agrouter warns, then its selection says what fell back, wrapped at spaces
+        out("[26-01-01 10:00:01] agrouter: warning: Classifier routing failed at the classify stage")
+        out("[26-01-01 10:00:01] (classifier_timeout); model and effort fall back to claude defaults")
+        out('[26-01-01 10:00:01] agrouter: selection:')
+        import json, textwrap as tw
+        sel = json.dumps({'cli': 'claude', 'model': None, 'effort': None,
+                          'reason': {'code': 'classifier_timeout', 'stage': 'classify',
+                                     'message': 'Model routing timed out'},
+                          'fallback': {'action': 'child_defaults', 'fields': ['model', 'effort'],
+                                       'message': "Model and effort fall back to the child's defaults"},
+                          'effective': {'model': {'value': 'claude-opus-5-5',
+                                                  'source': 'verified_child_default'},
+                                        'effort': {'value': None, 'source': 'child_default_unknown',
+                                                   'reason': {'code': 'default_not_reported'}}}},
+                         separators=(',', ':'))
+        for part in tw.wrap(sel, 60, break_long_words=False, break_on_hyphens=False):
+            out('[26-01-01 10:00:01] ' + part)
+        time.sleep(1.2); done('c'); commit('Task 2: two'); time.sleep(1.5)
+        out('--- claude review 1 ---')
+        out('agrouter: selection: {"cli":"claude","model":"claude-opus-5-5","effort":"high"}')
+        time.sleep(1.2); Path('fix.txt').write_text('x'); commit('fix: review finding')
+        time.sleep(1.5)
+        sys.exit(0)
     if mode == 'env':
         leaked = [k for k in ('CLAUDECODE', 'CODEX_SANDBOX', 'CODEX_THREAD_ID') if k in os.environ]
         out('LEAKED=' + ','.join(leaked)); sys.exit(0)
@@ -237,7 +277,11 @@ class AutopilotDriver(unittest.TestCase):
                         AUTOPILOT_CONFIG=str(base / 'no-autopilot-config'),
                         AUTOPILOT_DRIVER_DIR=str(DRIVER.parent), PYTHONUTF8='1',
                         PATH=str(self.fakebin) + os.pathsep + os.environ['PATH'],
-                        FAKE_COUNTER=str(base / 'counter'))
+                        FAKE_COUNTER=str(base / 'counter'), AUTOPILOT_WAKE='off')
+        # never type into the terminal the tests run in
+        for var in ('ORCA_TERMINAL_HANDLE', 'TMUX', 'TMUX_PANE', 'WEZTERM_PANE', 'KITTY_WINDOW_ID',
+                    'KITTY_LISTEN_ON', 'ITERM_SESSION_ID', 'CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID'):
+            self.env.pop(var, None)
 
     def drive(self, *args, env=None):
         res = subprocess.run([sys.executable, str(DRIVER), *args], cwd=self.repo,
@@ -346,6 +390,189 @@ class AutopilotDriver(unittest.TestCase):
         self.assertIn('recommended', auto[0]['reason'])
         self.assertIn('no new infra needed', auto[0]['reason'])
         self.assertIn('accepted the draft', auto[1]['reason'])
+        # agent-level timeout, logged the way the skills log "implement now" on no reply
+        self.drive('log', run['session'], '--kind', 'decision', '--by', 'auto',
+                   '--text', 'Implement now', '--question', 'Implement the plan now?',
+                   '--waited', '60', '--reason', 'plan accepted, tests included')
+        timeouts = self.drive('report', '--flow', flow)['timeouts']
+        self.assertEqual([(t['chosen'], t['recommended']) for t in timeouts],
+                         [('In-memory, local', True), ('accept', False), ('Implement now', True)])
+        self.assertEqual(timeouts[0]['question'], 'Which cache backend?')
+        self.assertTrue(all(t['waited_min'] is not None for t in timeouts))
+        self.assertEqual(timeouts[2]['waited_min'], 60)
+        self.assertIn('tests included', timeouts[2]['reason'])
+
+    def test_milestones_report_each_task_with_its_model_and_commit(self):
+        env = dict(self.env, FAKE_MODE='milestones', AUTOPILOT_PROGRESS_S='0.3',
+                   GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.com',
+                   GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@example.com')
+        plan = self.repo / 'p.md'
+        plan.write_text('# Plan\n### Task 1: one\n- [ ] a\n- [ ] b\n### Task 2: two\n- [ ] c\n')
+        subprocess.run(['git', 'add', '-A'], cwd=self.repo, check=True, env=env)
+        subprocess.run(['git', 'commit', '-q', '-m', 'init'], cwd=self.repo, check=True, env=env)
+        sid = self.drive('run', '--plan', 'p.md', env=env)['session']
+        updates, since = [], 0
+        deadline = time.time() + 40
+        while time.time() < deadline:
+            rep = self.wait(sid, since)
+            updates += rep['updates']
+            since = rep['seq']
+            if rep['status'] == 'done':
+                break
+        self.assertEqual([u for u in updates if not u.startswith('✓ Run')], [
+            '▶ Task 1/2 started: one · claude-opus-5-5 (xhigh) · steps 0/3',
+            '✓ Task 1/2 done in 0 min: one · claude-opus-5-5 (xhigh) · steps 2/3 · '
+            + updates[1].rsplit(' · ', 1)[1],
+            '⚠ Router fallback on Task 2/2: two: Model routing timed out (classifier_timeout, '
+            'classify stage). Not chosen by agrouter; runs on claude defaults: model '
+            'claude-opus-5-5 (verified default), effort unknown (claude did not report it).',
+            '▶ Task 2/2 started: two · claude-opus-5-5 (default effort) [router fallback] · steps 2/3',
+            '✓ Task 2/2 done in 0 min: two · claude-opus-5-5 (default effort) [router fallback] · '
+            'steps 3/3 · ' + updates[4].rsplit(' · ', 1)[1],
+            '▶ Code review: claude review 1 · claude-opus-5-5 (high)',
+            updates[6]])
+        self.assertTrue(updates[1].endswith(' Task 1: one'))
+        self.assertTrue(updates[4].endswith(' Task 2: two'))
+        self.assertRegex(updates[6], r'^• Commit [0-9a-f]+: fix: review finding$')
+        session = self.drive('report', sid)['sessions'][0]
+        log = session['task_log']
+        self.assertEqual(log['Task 1: one']['models'], ['claude-opus-5-5 (xhigh)'])
+        self.assertTrue(log['Task 2: two']['commit'].endswith('Task 2: two'))
+        self.assertEqual(session['models_used'], {'claude/claude-opus-5-5/xhigh': 1,
+                                                  'claude/claude-opus-5-5/? (router fallback)': 1,
+                                                  'claude/claude-opus-5-5/high': 1})
+        # a fallback is not an error, and the report and decision log keep it
+        self.assertEqual(session['errors'], [])
+        [fb] = session['router_fallbacks']
+        self.assertEqual((fb['code'], fb['title'], fb['fields']),
+                         ('classifier_timeout', 'Task 2: two', ['model', 'effort']))
+        decisions = self.drive('report', sid)['decisions']
+        [d] = [d for d in decisions if d['by'] == 'agrouter']
+        self.assertEqual(d['text'], 'Task 2: two: not routed, ran on claude defaults: model '
+                         'claude-opus-5-5 (verified default), effort unknown (claude did not report it)')
+        self.assertEqual(d['reason'], 'Model routing timed out (classifier_timeout)')
+
+    def milestone_env(self):
+        env = dict(self.env, FAKE_MODE='milestones', AUTOPILOT_PROGRESS_S='0.3',
+                   CLAUDE_CODE_SESSION_ID='chat-1',
+                   GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.com',
+                   GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@example.com')
+        plan = self.repo / 'p.md'
+        plan.write_text('# Plan\n### Task 1: one\n- [ ] a\n- [ ] b\n### Task 2: two\n- [ ] c\n')
+        subprocess.run(['git', 'add', '-A'], cwd=self.repo, check=True, env=env)
+        subprocess.run(['git', 'commit', '-q', '-m', 'init'], cwd=self.repo, check=True, env=env)
+        return env
+
+    def hook(self, event, env, chat='chat-1'):
+        res = subprocess.run([sys.executable, str(DRIVER), 'hook', event], cwd=self.repo, env=env,
+                             input=json.dumps({'session_id': chat, 'cwd': str(self.repo)}),
+                             capture_output=True, text=True, timeout=30)
+        return json.loads(res.stdout) if res.stdout.strip() else None
+
+    def test_stop_after_task_then_resume_with_the_same_flow(self):
+        env = self.milestone_env()
+        start = self.drive('run', '--plan', 'p.md', env=env)
+        sid = start['session']
+        rep = self.wait(sid)
+        while not any(u.startswith('▶ Task 1/2') for u in rep['updates']):
+            rep = self.wait(sid, rep['seq'])
+        self.assertEqual(self.drive('stop', sid, '--after-task', env=env)['status'], 'stop queued')
+        updates = []
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            rep = self.wait(sid, rep['seq'])
+            updates += rep['updates']
+            if rep['status'] in ('stopped', 'done', 'failed'):
+                break
+        self.assertEqual(rep['status'], 'stopped')
+        self.assertEqual(updates[0], '⏸ Will stop after Task 1/2 finishes (one).')
+        self.assertTrue(updates[1].startswith('✓ Task 1/2 done'), updates)
+        self.assertEqual(updates[-1], '■ Stopped after Task 1/2. Say "resume" to continue from the next one.')
+        self.assertIn('- [ ] c', (self.repo / 'p.md').read_text())  # task 2 untouched
+        resumed = self.drive('resume', sid, env=env)
+        self.assertEqual(resumed['flow'], start['flow'])
+        self.assertNotEqual(resumed['session'], sid)
+        self.drive('stop', resumed['session'], env=env)
+
+    def test_one_watcher_catch_up_and_hooks_keep_the_owner_in_charge(self):
+        env = self.milestone_env()
+        sid = self.drive('run', '--plan', 'p.md', env=env)['session']
+        first = subprocess.Popen([sys.executable, str(DRIVER), 'wait', sid, '--timeout', '60',
+                                  '--since', '999'], cwd=self.repo, env=env,
+                                 stdout=subprocess.PIPE, text=True)
+        time.sleep(1.5)
+        # a second wait takes over; the first one leaves without reporting anything
+        self.drive('wait', sid, '--timeout', '1', '--since', '999', env=env)
+        out, _ = first.communicate(timeout=10)
+        self.assertTrue(json.loads(out.strip().splitlines()[-1])['superseded'])
+        while self.drive('watch-status', sid, env=env)['sessions'][0]['alive']:
+            time.sleep(0.5)
+        # nobody saw the run end: the hooks speak up, only the owner chat is held back
+        context = self.hook('prompt', env)['hookSpecificOutput']['additionalContext']
+        self.assertIn(sid, context)
+        self.assertIn('This chat started it', context)
+        self.assertEqual(self.hook('stop', env)['decision'], 'block')
+        self.assertIsNone(self.hook('stop', env, chat='other-chat'))
+        self.assertIn('Another chat started it',
+                      self.hook('session-start', env, chat='other-chat')
+                      ['hookSpecificOutput']['additionalContext'])
+        # reattaching posts every missed line, in order
+        caught = self.drive('wait', sid, '--catch-up', env=env)['updates']
+        self.assertTrue(caught[0].startswith('▶ Task 1/2 started'), caught)
+        self.assertEqual(caught[-1], '✓ Run finished. Writing the final report.')
+        self.assertEqual(self.drive('wait', sid, '--catch-up', env=env)['updates'], [])
+        self.drive('mark-reported', sid, env=env)
+        self.assertIsNone(self.hook('stop', env))
+        self.assertIsNone(self.hook('prompt', env))
+
+    def test_unwatched_run_wakes_its_chat_by_typing_into_its_tab(self):
+        env = self.milestone_env()
+        typed = Path(self.tmp.name) / 'typed.txt'
+        tool = Path(self.tmp.name) / 'type-into-tab'
+        python_tool(tool, f'import sys\nopen({str(typed)!r}, "a").write(sys.argv[1] + "\\n")\n')
+        cfg = Path(self.tmp.name) / 'autopilot.cfg'
+        cfg.write_text(f'[wake]\ncommand = "{tool}" {{text}}\n')
+        env.update(AUTOPILOT_WAKE='type', AUTOPILOT_CONFIG=str(cfg), AUTOPILOT_WAKE_AFTER_S='1',
+                   AUTOPILOT_WAKE_EVERY_S='3', AUTOPILOT_LINGER_S='60', AUTOPILOT_WAKE_CHECK_S='0.5')
+        sid = self.drive('run', '--plan', 'p.md', env=env)['session']
+        # nobody waits: the supervisor types the wake line into the owner's tab
+        deadline = time.time() + 30
+        while time.time() < deadline and not typed.exists():
+            time.sleep(0.5)
+        line = typed.read_text().splitlines()[0]
+        self.assertTrue(line.startswith(f'autopilot: reattach to run {sid} ('), line)
+        st = lambda: self.drive('watch-status', sid, env=env)['sessions'][0]
+        while st()['alive']:
+            time.sleep(0.5)
+        # the run is over but unreported: the supervisor lingers and keeps waking
+        state = json.loads((Path(env['AUTOPILOT_STATE_DIR']) / 'sessions' / sid / 'state.json').read_text())
+        self.assertTrue(autopilot.pid_alive(state['pid']))
+        deadline = time.time() + 20
+        while 'ended (done)' not in typed.read_text() and time.time() < deadline:
+            time.sleep(0.5)
+        self.assertIn('ended (done)', typed.read_text())
+        self.drive('wait', sid, '--catch-up', env=env)
+        self.drive('mark-reported', sid, env=env)
+        deadline = time.time() + 20
+        while autopilot.pid_alive(state['pid']) and time.time() < deadline:
+            time.sleep(0.5)
+        self.assertFalse(autopilot.pid_alive(state['pid']))  # reported: the supervisor leaves
+
+    def test_wake_commands_for_typeable_terminals(self):
+        tmux = autopilot.wake_argv({'kind': 'tmux', 'handle': '%3', 'bin': 'tmux', 'socket': '/s'}, 'hi')
+        self.assertEqual(tmux, ['tmux', '-S', '/s', 'send-keys', '-t', '%3', '-l', 'hi', ';',
+                                'send-keys', '-t', '%3', 'Enter'])
+        self.assertEqual(autopilot.wake_argv({'kind': 'wezterm', 'handle': '7', 'bin': 'wezterm'}, 'hi'),
+                         ['wezterm', 'cli', 'send-text', '--pane-id', '7', '--no-paste', 'hi\r'])
+        self.assertEqual(autopilot.wake_argv({'kind': 'kitty', 'handle': '2', 'bin': 'kitty',
+                                              'to': 'unix:/k'}, 'hi'),
+                         ['kitty', '--to', 'unix:/k', '@', 'send-text', '--match', 'id:2', 'hi\r'])
+        orca = autopilot.wake_argv({'kind': 'orca', 'handle': 'h1', 'bin': 'orca'}, 'hi')
+        self.assertEqual(orca, ['orca', 'terminal', 'send', '--terminal', 'h1', '--text', 'hi', '--enter'])
+        with unittest.mock.patch.dict(os.environ, {'TMUX_PANE': '%9', 'TMUX': '/tmp/sock,1,0'}), \
+                unittest.mock.patch('shutil.which', return_value='/usr/bin/tmux'):
+            self.assertEqual(autopilot.own_tab(), {'kind': 'tmux', 'handle': '%9',
+                                                   'bin': '/usr/bin/tmux', 'socket': '/tmp/sock'})
 
     def start_run(self, mode):
         plan = self.repo / 'p.md'

@@ -1,0 +1,27 @@
+{
+  "description": "Keeps the chat that started an autopilot run in charge of it: tells a chat about runs nobody is watching when the user writes, and stops the owner chat from ending its turn without a watcher. Uses the Stop and UserPromptSubmit schema shared by Claude Code and Codex.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.sh\" prompt",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.sh\" stop",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

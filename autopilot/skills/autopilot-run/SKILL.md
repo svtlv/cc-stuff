@@ -1,10 +1,10 @@
 ---
 name: autopilot-run
-description: This skill should be used when the user runs "/autopilot-run" or "$autopilot-run", or asks to "run this plan with autopilot", "execute the plan", "implement docs/plans/x.md autonomously", "start the autopilot run", "resume the autopilot run" or "watch the run". It first checks that the plan file suits the runner (task sections, checkboxes, tests) and offers to redesign an unsuitable one with autopilot-plan, then executes it with the autonomous plan runner, monitors every phase, restarts failed attempts automatically, diagnoses and fixes blocking problems itself, shows errors as they happen, keeps the user posted on what the run is doing right now and ends with a full report.
+description: This skill should be used when the user runs "/autopilot-run" or "$autopilot-run", or asks to "run this plan with autopilot", "execute the plan", "implement docs/plans/x.md autonomously", "start the autopilot run", "resume the autopilot run", "watch the run", "pause after this task", or sends an "autopilot: reattach to run" wake line. It first checks that the plan file suits the runner (task sections, checkboxes, tests) and offers to redesign an unsuitable one with autopilot-plan, then executes it with the autonomous plan runner, monitors every phase, restarts failed attempts automatically, diagnoses and fixes blocking problems itself, shows errors as they happen, keeps the user posted on what the run is doing right now and ends with a full report.
 argument-hint: "<plan file> [-- extra runner flags such as --worktree or --tasks-only]"
-allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, Agent
+allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, Agent, CronCreate, CronDelete
 metadata:
-  version: "0.1.0"
+  version: "0.2.0"
 ---
 
 # Autopilot Run
@@ -28,6 +28,7 @@ Resolve paths from the directory holding this `SKILL.md`:
 | Plan check and redesign | `../autopilot/references/plan-check.md` |
 | Changing a finished plan | `../autopilot/references/plan-revision.md` |
 | Self-recovery | `../autopilot/references/recovery.md` |
+| Mid-run control, watchdog, reattach | `../autopilot/references/control.md` |
 | Final report | `../autopilot/references/report.md` |
 | Rate limits | `../autopilot/references/limits.md` |
 | Response times | `../autopilot/references/response-times.md` |
@@ -96,7 +97,9 @@ Ask in plain text with the start time ("starting at 16:10 unless you say
 stop"), run an
 `ask-timer` with `--decision run_start` (30 min, reminder 10 min before) per
 `response-times.md`, and start when it expires. Log the
-start decision on the run session once it exists.
+start decision on the run session once it exists (`--by auto --question
+... --waited <N>` when it started on the timeout, per "Logging Critical
+Decisions" in `monitoring.md`).
 
 ## Step 3 — Start
 
@@ -106,23 +109,24 @@ AP run --plan <plan path> [--flow <id>] [--max-restarts N] [-- <extra flags>]
 
 Pass `--flow` when the `autopilot` skill provides one; otherwise keep the
 `flow` this first run returns and reuse it for every recovery restart. Tell
-the user it has started, with the session id, and that updates follow every
-few minutes.
+the user it has started, with the session id, and that a line follows for
+every task start and finish, review, commit and problem.
 
 ## Step 4 — Monitor Until It Ends
 
 Follow `monitoring.md`: loop on `AP wait <session> --since <seq> --timeout
-240`, in the way the host supports (`hosts.md`).
+1500`, in the way the host supports (`hosts.md`). Post every line of the
+report's `updates` as is ("Update Formats" in `monitoring.md`); the table
+says what to add or do on top.
 
 | Report | Response |
 |---|---|
-| heartbeat | Two-line update: elapsed time, task N of M and its title, phase, and one plain sentence from `activity` on what it is doing now. |
-| `section` event | Fold into the next update ("Tasks done. Code review 1 started."). |
-| `error` event | Quote the error line, say whether the runner is retrying it. |
-| `restart` event | Show the error, the restart number and the delay. Finished tasks are kept. |
+| heartbeat | Post nothing; call `wait` again. |
+| `task-start`, `task-done`, `phase-start`, `commit`, `error`, `restart` | The line only. |
+| `stalled` | The line, plus one sentence from the log's last lines on what it is stuck on. |
 | `waiting` | The runner needs input. Register a recommendation, relay the prompt verbatim with its auto-answer time (`runtime`, 10 min: the run is blocked meanwhile), answer with the user's reply ("Unattended Defaults"). |
-| `auto-answered` | One line: what was chosen without a reply, and why. |
-| `limit` / `limit-cleared` | Rate limit: say which tool, when it resets and that the runner retries on its own; later, how long it took. Switch to `--timeout 900` while limited. See `limits.md`. |
+| `auto-answered` | The line (what was chosen without a reply, and why). |
+| `limit` / `limit-cleared` | The line, with the reset as a clock time. See `limits.md`. |
 | `failed`, category `limit` | Reset is hours away: pick and recommend an option per "Long Limits" in `limits.md`; `ask-timer` with `--decision limit` (30 min). |
 | `failed` / `lost` | Show the error in one or two lines, then recover on your own per `recovery.md`: known fix or diagnosis (a read-only subagent may help), log every step, start again with the same `--flow`. Stop only when recovery needs the user or 3 rounds are used. |
 | `review-skipped` / `review-skip-queued` | The external code review was ended (or will be when it starts). One line; note it for the report. |
@@ -130,11 +134,19 @@ Follow `monitoring.md`: loop on `AP wait <session> --since <seq> --timeout
 | `stopped` | Confirm, with tasks done so far, then Step 5. |
 | `done` | Step 5. |
 
-The user may ask questions mid-run. Answer from the latest report or the log
-without stopping the run. When they ask to stop, run `AP stop <session>`.
-When they ask to change the plan mid-run, follow "Changing a Plan During a
-Run" in `plan-revision.md`: stop at a safe point, edit directly, show the
-diff, start again with the same `--flow`.
+### Staying in Charge
+
+This chat owns the run: the user can ask about it and have it act at any
+time ("Mid-Run Requests" in `control.md`). Questions are answered from the
+report, the log and the run branch's commits while the run continues.
+Changes to code, the plan or models go through a safe point: `AP stop
+<session> --after-task`, change, `AP resume <session>`. Keep exactly one
+`wait` in flight ("One Watcher"). If the chat goes quiet (its own usage
+limit), the supervisor wakes it by typing a line into its terminal tab, for
+any provider ("Waking the Chat"); on Claude Code in a terminal that cannot
+be typed into, arm the watchdog cron when the run starts. On a wake line, in
+a new chat, or after any interruption, reattach with `AP wait <session>
+--catch-up` ("Reattach").
 
 ## Step 5 — Final Report
 
@@ -145,13 +157,16 @@ their status, critical decisions (user, default after the response time, autopil
 agent), a full explanation of what was built (explain-summarize on the
 branch changes when available), problems and recoveries, state now, next
 steps. Note where the plan went when the runner moved it to `completed/`.
+Then `AP mark-reported <session>` (the supervisor stops waking) and delete
+the watchdog cron job if one was made.
 
 ## Rules
 
 - Keep the run supervised by the driver. Never start the runner directly in
   the foreground: it blocks the agent and loses restarts.
-- Never edit repository files while the run is active. Recovery fixes
-  happen only between sessions, on the run's branch, within the guardrails
-  of `recovery.md`.
+- Never edit repository files while the run is active. Code changes the
+  user asks for, and recovery fixes, happen only after a safe stop
+  (`--after-task`) or between sessions, on the run's branch, within the
+  guardrails of `recovery.md`.
 - Do not hide failures. Every `error`, `restart` and `failed` event reaches
   the user, quoted.

@@ -2,9 +2,9 @@
 name: autopilot
 description: This skill should be used when the user runs "/autopilot" or "$autopilot", or asks to "autopilot this", "plan and implement this autonomously", "do the full autopilot run", "take this from idea to code", "plan it, explain it, then build it", "run the whole plan-and-execute flow" or "build this while I'm away". It orchestrates the full flow on the autonomous plan runner and model router - interactive planning with the user, a summary and explanation of the plan, the decision to implement or stop, then a supervised implementation run with automatic restarts, self-recovery and live status. It keeps going when the user is away (recommended answers after a response time: 10 minutes for questions, an hour to decide on implementation) and always ends with a full report of what was built and every critical decision.
 argument-hint: "[task description | path to an existing plan file] [-- extra runner flags]"
-allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, Skill, Agent
+allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, Skill, Agent, CronCreate, CronDelete
 metadata:
-  version: "0.1.0"
+  version: "0.2.0"
 ---
 
 # Autopilot
@@ -120,8 +120,9 @@ deadline as a clock time ("Asking" in `references/response-times.md`).
 Start `AP ask-timer start --id <flow>-decide --decision decide` (60 min,
 reminder 15 min before), loop on `ask-timer wait`, `cancel` it on a reply,
 and act on the recommendation when it expires. Log the outcome on the plan
-session: `AP log <plan-session> --kind decision --text "<choice> (by user |
-auto: no reply in <N> min)" --reason "<why>"`.
+session: `AP log <plan-session> --kind decision --text "<choice>" --reason
+"<why>"`, adding `--by user` on a reply, or `--by auto --question "Implement
+the plan now?" --waited <N>` when the timer expired.
 
 | Option | Effect |
 |---|---|
@@ -136,13 +137,16 @@ start the run; do not ask again in the run's preflight.
 ## Step 5 — Run
 
 Follow `autopilot-run` Steps 2–4 with the plan and `--flow <id>`. Stay
-with the run until it ends: heartbeats with what it is doing now, every
-error quoted, automatic restarts reported, failures recovered per
-`recovery.md`.
+with the run until it ends: one fixed line per milestone (each task's start
+with its model and its finish with the commit, reviews, restarts, limits),
+nothing on heartbeats, failures recovered per `recovery.md`. The user can
+ask about the run or have it changed at any time; this chat stays in charge
+per `references/control.md` (safe stop, resume, watchdog, reattach).
 
 ## Step 6 — Final Report
 
-Always, whatever happened: done, failed after recovery, stopped, or ended
+After the report, `AP mark-reported <run-session>` and delete the watchdog
+cron job. Always, whatever happened: done, failed after recovery, stopped, or ended
 at the plan stage. Follow `references/report.md` with `AP report --flow
 <id>`: a summary, what was asked, the critical decisions (who made each and
 why, auto-defaults marked), a full explanation of what was built

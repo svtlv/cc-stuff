@@ -52,9 +52,9 @@ On the `limit` event, one update:
   ralphex retries every 15 min on its own; finished tasks are kept.
 ```
 
-While limited, use `wait --timeout 900`: heartbeats every 15 minutes are
-enough, and each says only the time left. On `limit-cleared`: "▶ Limit
-cleared after 47 min, back to task 4 of 7."
+While limited, post nothing on heartbeats: the `limit` line already gave
+the reset time, and `limit-cleared` posts "▶ Limit cleared after 47 min;
+work continues."
 
 Never call a limited run hung, and never stop or restart it because it is
 quiet: the runner is sleeping on purpose.

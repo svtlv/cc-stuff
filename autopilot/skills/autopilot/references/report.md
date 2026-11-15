@@ -13,7 +13,7 @@ AP report --flow <flow>
 
 returns every session of the flow (plan, runs, recovery runs) with status,
 duration, attempts, restarts, errors and phases; the full decision log in
-time order; and, on the run's branch, the commits and a diffstat against
+time order; `timeouts`, every choice taken without a reply; and, on the run's branch, the commits and a diffstat against
 the default branch. Also read the final plan file (it may have moved to
 `<plans_dir>/completed/`).
 
@@ -39,7 +39,9 @@ anything the user must do now.
 
 ## What was asked
 The task description and the plan file path, with the plan's tasks as a
-table (task, status ✓/✗/–). List plan revisions (who asked, what changed)
+table: task, status ✓/✗/–, model(s), minutes, commit. Take the last three
+from each run session's `task_log` (models per task as the router picked
+them, `iterations` when a task took more than one). List plan revisions (who asked, what changed)
 and superseded plan backups.
 
 ## Critical decisions
@@ -48,13 +50,27 @@ Every entry of the decision log that changed the outcome: planner answers,
 draft accept/revise, implement or stop, auto-defaults (mark "auto, no reply
 in <N> min"), recoveries, bypasses, code fixes. Skip routine noise.
 
+## Decided without you
+| When | Question | Chosen | Waited | Why |
+Every entry of `timeouts`, none skipped, even routine ones: planner
+questions, draft review, runner prompts, implement or start, limits,
+recovery, preflight. "Why" is the reason the option was the recommendation.
+When `recommended` is false, say so plainly ("no recommendation was ready:
+took the first option" / "accepted the draft unreviewed") and flag it for
+review. End with one line on what can still be changed (revise the plan,
+re-run a task, revert a commit). "None: every decision was yours" when
+the list is empty.
+
 ## What was built
 The explain-summarize output for the branch: summary, then the walkthrough
 with diagrams and file:line links. Then the commit list.
 
 ## Problems and recovery
 | Time | Problem | What autopilot did | Outcome |
-Restarts, failures, fixes with commit hashes. "None" when clean.
+Restarts, failures, fixes with commit hashes. Every entry of each session's
+`router_fallbacks` too: the task or step, why agrouter failed (`message`,
+`code`), and the defaults it ran on (model and effort, verified or
+unknown). "None" when clean.
 
 ## State now
 Branch, worktree (if any), plan location, tests/validation status from the
@@ -72,5 +88,6 @@ missing key, follow-ups the planner deferred.
   when no run happened) and give the path. Offer once to copy it into the
   repository (for example next to the plan in `completed/`); do not commit
   it unasked.
-- When the flow ended unattended (auto-defaults were used), start the
-  report with one line saying so, so the user sees which choices to review.
+- When any decision was taken on a timeout, start the report with one
+  line saying how many and pointing to "Decided without you", so the user
+  sees which choices to review.

@@ -59,7 +59,7 @@ ask in plain text ─► AP ask-timer start --id <flow>-decide --decision decide
         ▼
 AP ask-timer wait --id <flow>-decide ─┬─ reminder ─► post reminder ─► wait again
    (≤ 25 min per call)                ├─ pending  ─► wait again (chunk ended)
-                                      ├─ expired  ─► act on the recommendation, log it
+                                      ├─ expired  ─► act on the recommendation, log it --by auto
                                       └─ never    ─► no timer: wait for the user
 user replies ─► AP ask-timer cancel --id ... ─► act on the reply, log it
 ```

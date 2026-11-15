@@ -47,7 +47,7 @@ SECRET_KEY = re.compile(r'(?i)(api_key|(?<!_per)_token$|^token$|secret|password|
 SECTION_RE = re.compile(r'^--- (.+) ---$')
 TS_RE = re.compile(r'^\[\d\d-\d\d-\d\d \d\d:\d\d:\d\d\] ?')
 # lines the CLI itself prints on trouble; model output mentioning "error" is ignored
-ERROR_RE = re.compile(r"(?i)^(ERROR:|Failed:|panic:|fatal:|error:)|^agrouter: (?!selection:)|"
+ERROR_RE = re.compile(r"(?i)^(ERROR:|Failed:|panic:|fatal:|error:)|^agrouter: (?!selection:|warning:)|"
                       r"hit your (?:usage |session |weekly |org's monthly )?limit|"
                       r'API Error: \d{3}')
 # broader net used only to pick the line that explains a failed attempt
@@ -78,6 +78,18 @@ DIAG_PREFIX_RE = re.compile(r'(?i)^(agrouter:|ERROR:|error: detected)')
 HELP_LINE_RE = re.compile(r"^run '.+' for more information")
 # what is actually running: the router's selection line, or the codex executor's banner
 SELECTION_RE = re.compile(r'^agrouter: selection: (\{.*\})')
+ROUTER_WARNING_RE = re.compile(r'^agrouter: warning: (.+)')
+# no output this long while running (not waiting on a prompt or a limit) is worth a look
+STALL_S = int(os.environ.get('AUTOPILOT_STALL_S', 1200))
+PROGRESS_S = float(os.environ.get('AUTOPILOT_PROGRESS_S', 5))  # how often the plan is re-read
+# waking the owner chat: after this long unwatched with news, then again every WAKE_EVERY_S;
+# after the run ends the supervisor keeps trying for LINGER_S
+WAKE_AFTER_S = float(os.environ.get('AUTOPILOT_WAKE_AFTER_S', 600))
+WAKE_EVERY_S = float(os.environ.get('AUTOPILOT_WAKE_EVERY_S', 1200))
+LINGER_S = float(os.environ.get('AUTOPILOT_LINGER_S', 6 * 3600))
+WAKE_CHECK_S = float(os.environ.get('AUTOPILOT_WAKE_CHECK_S', 15))
+WAKE_EVENTS = {'task-done', 'phase-start', 'restart', 'failed', 'done', 'stopped', 'stalled',
+               'router-fallback', 'limit', 'limit-cleared', 'needs-input', 'auto-answered'}
 BANNER_RE = re.compile(r'^(model|reasoning effort): (\S+)$')
 CLAUDE_FAMILY = re.compile(r'(?i)^(opus|sonnet|fable|haiku|claude-)')
 CODEX_FAMILY = re.compile(r'(?i)^(gpt-|o\d|codex)')
@@ -239,6 +251,12 @@ def session_dir(ref):
     if (candidate / 'session.json').exists():
         return candidate
     die(f'unknown session: {ref}')
+
+
+def session_active(st):
+    """The run is still going: its supervisor lives and has not ended (it may linger after the
+    end to wake the chat, which does not count)."""
+    return pid_alive(st.get('pid')) and st.get('status') not in ('done', 'failed', 'stopped')
 
 
 def pid_alive(pid):
@@ -1421,7 +1439,7 @@ def list_sessions(repo=None, all_repos=False):
             continue
         st = read_json(d / 'state.json', {})
         out.append({'session': d.name, 'kind': meta['kind'], 'target': meta.get('target'),
-                    'status': st.get('status'), 'alive': pid_alive(st.get('pid')),
+                    'status': st.get('status'), 'alive': session_active(st),
                     'created': meta.get('created_iso')})
     return out
 
@@ -1456,6 +1474,99 @@ def require_tools():
     if missing:
         die(f"not installed: {', '.join(missing)}; run the autopilot-setup skill first")
     return cli
+
+
+def host_session_id():
+    """The chat that runs this command (Claude Code or Codex), or None elsewhere."""
+    return os.environ.get('CLAUDE_CODE_SESSION_ID') or os.environ.get('CODEX_THREAD_ID')
+
+
+# Terminals that tell a process which tab it runs in and can type a line into that tab.
+# Typing the wake line works for any agent CLI (Claude Code, Codex, Gemini, ...): to the
+# agent it is an ordinary user message. {handle} is the tab id, {text} the line.
+WAKE_TERMINALS = [
+    ('orca', 'ORCA_TERMINAL_HANDLE',
+     ['{bin}', 'terminal', 'send', '--terminal', '{handle}', '--text', '{text}', '--enter']),
+    ('tmux', 'TMUX_PANE',
+     ['{bin}', 'send-keys', '-t', '{handle}', '-l', '{text}', ';', 'send-keys', '-t', '{handle}', 'Enter']),
+    ('wezterm', 'WEZTERM_PANE', ['{bin}', 'cli', 'send-text', '--pane-id', '{handle}', '--no-paste', '{text_nl}']),
+    ('kitty', 'KITTY_WINDOW_ID', ['{bin}', '@', 'send-text', '--match', 'id:{handle}', '{text_nl}']),
+    ('iterm', 'ITERM_SESSION_ID', ['osascript', '-e', '{applescript}']),
+]
+
+
+def own_tab():
+    """The terminal tab this command runs in, when its terminal can be typed into; else None."""
+    custom = autopilot_config('wake').get('command')
+    for kind, var, _ in WAKE_TERMINALS:
+        handle = os.environ.get(var, '').strip()
+        if not handle:
+            continue
+        tab = {'kind': kind, 'handle': handle}
+        if kind == 'orca':
+            tab['bin'] = os.environ.get('ORCA_CLI_COMMAND') or shutil.which('orca')
+        elif kind == 'tmux':
+            tab['bin'] = shutil.which('tmux')
+            tab['socket'] = os.environ.get('TMUX', '').split(',')[0] or None
+        elif kind == 'kitty':
+            tab['bin'] = shutil.which('kitty')
+            tab['to'] = os.environ.get('KITTY_LISTEN_ON')
+            if not tab['to']:
+                continue  # kitty accepts remote control only through its socket
+        elif kind == 'iterm':
+            tab['handle'] = handle.split(':', 1)[-1]  # w0t0p0:<unique id>
+            tab['bin'] = shutil.which('osascript')
+        else:
+            tab['bin'] = shutil.which(kind)
+        if tab.get('bin'):
+            return tab
+    if custom:  # any other terminal: [wake] command = mytool send {text}
+        return {'kind': 'custom', 'command': custom}
+    return None
+
+
+def wake_argv(tab, text):
+    """The command that types text (and Enter) into tab."""
+    if tab['kind'] == 'custom':
+        return [a.replace('{text}', text) for a in split_args(tab['command'])]
+    spec = next(t for k, _, t in WAKE_TERMINALS if k == tab['kind'])
+    quoted = text.replace('\\', '\\\\').replace('"', '\\"')
+    applescript = ('tell application "iTerm2"\nrepeat with w in windows\n'
+                   'repeat with t in tabs of w\nrepeat with s in sessions of t\n'
+                   f'if id of s is "{tab["handle"]}" then tell s to write text "{quoted}"\n'
+                   'end repeat\nend repeat\nend repeat\nend tell')
+    values = {'{bin}': tab.get('bin') or '', '{handle}': tab['handle'], '{text}': text,
+              '{text_nl}': text + '\r', '{applescript}': applescript}
+    argv = []
+    for arg in spec:
+        for key, value in values.items():
+            arg = arg.replace(key, value)
+        argv.append(arg)
+    if tab['kind'] == 'tmux' and tab.get('socket'):
+        argv[1:1] = ['-S', tab['socket']]
+    if tab['kind'] == 'kitty' and tab.get('to'):
+        argv[1:1] = ['--to', tab['to']]
+    return argv
+
+
+def notify(title, text):
+    """A desktop notification, best effort: macOS, Linux; nothing elsewhere."""
+    if sys.platform == 'darwin' and shutil.which('osascript'):
+        msg = text.replace('\\', '').replace('"', "'")
+        run_quiet(['osascript', '-e', f'display notification "{msg}" with title "{title}"'])
+    elif shutil.which('notify-send'):
+        run_quiet(['notify-send', title, text])
+
+
+def split_args(text):
+    import shlex
+    return shlex.split(text, posix=not WINDOWS)
+
+
+def wake_mode():
+    """type (type into the owner's tab, else notify), notify, or off."""
+    mode = (os.environ.get('AUTOPILOT_WAKE') or autopilot_config('wake').get('mode') or 'type').lower()
+    return mode if mode in ('type', 'notify', 'off') else 'type'
 
 
 def start_session(kind, target, cli_args, max_restarts, flow=None):
@@ -1503,7 +1614,8 @@ def start_session(kind, target, cli_args, max_restarts, flow=None):
             review_note = code_review['reason']
     argv += added + cli_args
     write_json(sdir / 'session.json', {
-        'kind': kind, 'target': target, 'repo': repo, 'argv': argv,
+        'kind': kind, 'target': target, 'repo': repo, 'argv': argv, 'cli_args': list(cli_args),
+        'owner': host_session_id(), 'tab': own_tab(),
         'max_restarts': max_restarts, 'created': now(),
         'flow': flow or f'flow-{stamp}-{secrets.token_hex(2)}', 'executor': executor,
         'policy': load_policy(),
@@ -1577,6 +1689,17 @@ class Supervisor:
         self.proc = None
         self.last_draft = None  # output offset of the draft whose copies were last written
         self.log = open(self.sdir / 'output.log', 'a', encoding='utf-8')
+        # milestones: one event per step start (with its model), task done and commit
+        self.sel_lines = None   # lines of a selection JSON printed under its own header
+        self.step = None        # the section running now, announced once its model is known
+        self.plan_path = None   # the plan file progress is read from (worktree copy or repo)
+        self.plan_tasks = []    # [(title, done, total)] from the last progress read
+        self.complete = None    # titles of finished tasks; None until the first read
+        self.done_pending = []  # finished tasks waiting briefly for their commit
+        self.head = None        # last commit already reported
+        self.head_where = None  # the checkout self.head belongs to
+        self.stalled = False
+        self.state.setdefault('task_log', {})
 
     # -- state
     def save(self):
@@ -1593,6 +1716,9 @@ class Supervisor:
                   'kind': kind, **data}
             self.state['events'] = (self.state['events'] + [ev])[-40:]
             self.save()
+            # the full timeline: a chat that reattaches after hours catches up from here
+            with open(self.sdir / 'events.jsonl', 'a', encoding='utf-8') as fh:
+                fh.write(json.dumps(ev, ensure_ascii=False) + '\n')
 
     # -- worktree runs
     def worktree_mode(self):
@@ -1734,6 +1860,12 @@ class Supervisor:
             phase = next((p for rx, p in PHASES if rx.search(label)), label)
             self.state.update({'section': label, 'phase': phase})
             self.event('section', section=label, phase=phase)
+            self.sel_lines = None
+            self.flush_done(force=True)
+            self.announce_step()  # a previous step that never reported its model
+            if self.step and self.step['phase'] != 'implementing tasks':
+                self.safe_point(self.step['section'])  # a review round ended
+            self.step = {'section': label, 'phase': phase, 'at': now(), 'model': None}
             if phase == 'external review' and self.state.get('skip_external'):
                 self.break_external_review()
             return
@@ -1749,6 +1881,12 @@ class Supervisor:
         if m:
             self.event('transient', tool=m.group(1), pattern=m.group(2))
             return
+        m = ROUTER_WARNING_RE.match(line)
+        if m:
+            # the classifier-failure warning repeats the selection JSON's fallback: reported there
+            if not m.group(1).startswith('Classifier routing failed'):
+                self.event('router-warning', text=m.group(1)[:300])
+            return
         if line and ERROR_RE.search(line):
             errs = self.state.setdefault('errors', [])
             errs.append({'t': time.strftime('%H:%M:%S'), 'line': line[:300]})
@@ -1756,15 +1894,34 @@ class Supervisor:
             self.event('error', line=line[:300])
 
     def scan_model(self, line):
-        """Record which CLI/model/effort runs now; True when the line was a selection."""
+        """Record which CLI/model/effort runs now; True when the line was a selection.
+
+        The runner prints the router's selection either on one line or as a bare
+        "agrouter: selection:" header followed by the JSON on the next line(s).
+        """
+        if self.sel_lines is not None:
+            self.sel_lines.append(TS_RE.sub('', line))
+            try:
+                # the runner word-wraps long lines: a break was a space (JSON allows it between tokens)
+                sel = json.loads(' '.join(self.sel_lines))
+            except ValueError:
+                if len(self.sel_lines) >= 40 or not self.sel_lines[0].startswith('{'):
+                    self.sel_lines = None
+                    return False
+                return True
+            self.sel_lines = None
+            self.use_selection(sel)
+            return True
+        if line.rstrip() == 'agrouter: selection:':
+            self.sel_lines = []
+            return True
         m = SELECTION_RE.search(line)
         if m:
             try:
                 sel = json.loads(m.group(1))
             except ValueError:
                 return True
-            self.state['model'] = {k: sel.get(k) for k in ('cli', 'model', 'effort')}
-            self.count_model(self.state['model'])
+            self.use_selection(sel)
             return True
         m = BANNER_RE.match(line)
         if m:
@@ -1776,13 +1933,61 @@ class Supervisor:
             self.state['model'] = model
             if m.group(1) != 'model':
                 self.count_model(model)
+                if self.step:
+                    self.step['model'] = dict(model)
+                    self.announce_step()
             self.save()
             return True
         return False
 
+    def use_selection(self, sel):
+        model = {k: sel.get(k) for k in ('cli', 'model', 'effort')}
+        # a value agrouter left to the CLI: record what the CLI really runs with, and why
+        effective = sel.get('effective') or {}
+        defaults = {}
+        for field in ('model', 'effort'):
+            eff = effective.get(field)
+            if model[field] is None and eff:
+                model[field] = eff.get('value')
+                defaults[field] = {'value': eff.get('value'), 'source': eff.get('source'),
+                                   'why': (eff.get('reason') or {}).get('code')}
+        reason = sel.get('reason') or {}
+        fallback = sel.get('fallback')
+        if fallback or reason:
+            model['fallback'] = {'fields': (fallback or {}).get('fields') or list(defaults),
+                                 'code': reason.get('code'), 'stage': reason.get('stage'),
+                                 'message': reason.get('message'), 'defaults': defaults}
+        elif defaults:
+            model['defaults'] = defaults  # routing worked and left these to the CLI on purpose
+        if (sel.get('readiness') or {}).get('excluded'):
+            model['excluded'] = sel['readiness']['excluded']
+        self.state['model'] = model
+        self.count_model(model)
+        if model.get('fallback'):
+            tasks = self.plan_progress() or {}
+            title = tasks.get('current_task') if self.step and \
+                self.step['phase'] == 'implementing tasks' else None
+            index, count = self.task_position(title)
+            entry = {'t': time.strftime('%H:%M:%S'), 'section': self.state.get('section'),
+                     'task': index, 'tasks': count, 'title': title, 'cli': model.get('cli'),
+                     **model['fallback']}
+            self.state.setdefault('router_fallbacks', []).append(entry)
+            self.event('router-fallback', **entry)
+            where = entry['title'] or entry['section'] or 'this step'
+            log_decision(self.sdir, kind='recovery', by='agrouter',
+                         text=f"{where}: not routed, ran on {entry['cli'] or 'CLI'} defaults: "
+                              f"{fallback_values(entry)}",
+                         reason=' '.join(x for x in (entry.get('message'), entry.get('code')
+                                                     and f"({entry['code']})") if x))
+        if self.step:
+            self.step['model'] = dict(self.state['model'])
+            self.announce_step()
+
     def count_model(self, model):
         """Tally calls per cli/model/effort for the final report."""
         key = '/'.join(str(model.get(k) or '?') for k in ('cli', 'model', 'effort'))
+        if model.get('fallback'):
+            key += ' (router fallback)'
         used = self.state.setdefault('models_used', {})
         used[key] = used.get(key, 0) + 1
         self.save()
@@ -1931,7 +2136,20 @@ class Supervisor:
             path.unlink(missing_ok=True)
             if msg.get('stop'):
                 self.stop_requested = True
-                kill_tree(self.proc.pid if self.proc else None)
+                self.kill_child()
+                continue
+            if 'stop_after_task' in msg:
+                self.state['stop_after'] = bool(msg['stop_after_task'])
+                tasks = self.state.get('tasks') or {}
+                title = tasks.get('current_task') if self.state.get('phase') == \
+                    'implementing tasks' else None
+                index, count = self.task_position(title)
+                self.event('stop-queued' if msg['stop_after_task'] else 'stop-cancelled',
+                           task=index, tasks=count, title=title, section=self.state.get('section'))
+                log_decision(self.sdir, kind='decision', by=msg.get('by', 'user'),
+                             text=('stop after the current ' + ('task' if title else 'step'))
+                             if msg['stop_after_task'] else 'cancelled the stop after this task',
+                             reason=msg.get('reason'))
                 continue
             if msg.get('skip_external'):
                 if not self.state.get('skip_external'):
@@ -1964,14 +2182,20 @@ class Supervisor:
                 self.deliver(waiting, msg['send'], msg.get('summary', ''),
                              msg.get('by', 'user'), msg.get('reason'))
 
-    def deliver(self, waiting, send, summary, by, reason=None):
+    def deliver(self, waiting, send, summary, by, reason=None, recommended=None):
         self.send(send)
+        extra = {}
+        if by == 'auto':
+            # timeouts get their own report section: how long nobody answered, and whether
+            # the answer was the agent's recommendation or the driver's blind fallback
+            extra = {'waited_min': round((now() - waiting.get('asked_at', now())) / 60, 1),
+                     'recommended': bool(recommended)}
         self.state['answered_at'] = now()
         self.state['waiting'] = None
         self.state['status'] = 'running'
         log_decision(self.sdir, kind='answer', by=by, prompt=waiting['kind'],
                      question=describe_prompt(waiting), options=waiting.get('options'),
-                     answer=summary, reason=reason)
+                     answer=summary, reason=reason, **extra)
         self.event('auto-answered' if by == 'auto' else 'answered',
                    summary=summary, by=by, reason=reason)
 
@@ -2018,14 +2242,17 @@ class Supervisor:
             choice = (rec['send'], rec['summary'],
                       f'no reply in {minutes} min: took the recommended option. '
                       + (rec.get('reason') or ''))
+            recommended = True
         else:
             choice = fallback_answer(waiting)
+            recommended = False
         if not choice:
             if not waiting.get('needs_input'):
                 waiting['needs_input'] = True
                 self.event('needs-input', question=describe_prompt(waiting))
             return
-        self.deliver(waiting, choice[0], choice[1], 'auto', choice[2].strip())
+        self.deliver(waiting, choice[0], choice[1], 'auto', choice[2].strip(),
+                     recommended=recommended)
 
     # -- progress
     def plan_progress(self):
@@ -2047,9 +2274,11 @@ class Supervisor:
         path = next((c for c in candidates if c.exists()), None)
         if not path:
             return None
+        self.plan_path = path
         done = total = 0
         current = None
         task = None
+        counts = {}  # title -> [done, total], in plan order
         for line in path.read_text(encoding='utf-8', errors='replace').splitlines():
             hm = re.match(r'^###\s+(.*)', line)
             if hm:
@@ -2057,11 +2286,226 @@ class Supervisor:
             cm = re.match(r'^\s*- \[([ xX])\]', line)
             if cm:
                 total += 1
+                c = counts.setdefault(task, [0, 0])
+                c[1] += 1
                 if cm.group(1) != ' ':
                     done += 1
+                    c[0] += 1
                 elif current is None:
                     current = task
+        self.plan_tasks = [(t, d, n) for t, (d, n) in counts.items()]
         return {'done': done, 'total': total, 'current_task': current}
+
+    # -- milestones
+    def task_position(self, title):
+        titles = [t for t, _, _ in self.plan_tasks]
+        return (titles.index(title) + 1 if title in titles else None), len(titles)
+
+    def announce_step(self, timed_out=False):
+        """One event per step: task-start (task, model, steps) or phase-start (review, ...)."""
+        step = self.step
+        if not step or step.get('announced') or not (step['model'] or timed_out):
+            return
+        step['announced'] = True
+        model = step['model']
+        if step['phase'] != 'implementing tasks':
+            self.event('phase-start', section=step['section'], phase=step['phase'], model=model)
+            return
+        tasks = self.plan_progress() or {}
+        self.state['tasks'] = tasks
+        title = tasks.get('current_task')
+        index, count = self.task_position(title)
+        log = self.state['task_log']
+        entry = log.get(title) if title else None
+        continued = bool(entry)
+        if title and not entry:
+            entry = log[title] = {'index': index, 'started': now(), 'models': [], 'iterations': 0}
+        if entry is not None:
+            entry['iterations'] += 1
+            key = model_label(model)
+            if key not in entry['models']:
+                entry['models'].append(key)
+        m = re.search(r'(\d+)\s*$', step['section'])
+        self.event('task-start', task=index, tasks=count, title=title, model=model,
+                   iteration=int(m.group(1)) if m else None, continued=continued,
+                   steps_done=tasks.get('done'), steps_total=tasks.get('total'))
+
+    def git_here(self, *argv):
+        where = self.plan_path.parent if self.plan_path else Path(self.meta['repo'])
+        return run_quiet(['git', *argv], cwd=where)
+
+    def new_commits(self):
+        """[(hash, subject)] committed since the last check, oldest first."""
+        code, head = self.git_here('rev-parse', '--short', 'HEAD')
+        if code != 0 or not head:
+            return []
+        where = str(self.plan_path.parent if self.plan_path else self.meta['repo'])
+        if self.head is None or head == self.head or where != self.head_where:
+            # first look, nothing new, or progress moved into a worktree: new baseline
+            self.head, self.head_where = head, where
+            return []
+        code, out = self.git_here('log', '--reverse', '--format=%h%x09%s', f'{self.head}..HEAD')
+        self.head = head
+        return [tuple(l.split('\t', 1)) for l in out.splitlines() if '\t' in l] if code == 0 else []
+
+    def track_progress(self):
+        """Called every few seconds: record progress, report finished tasks and new commits."""
+        self.state['tasks'] = self.plan_progress()
+        finished = {t for t, d, n in self.plan_tasks if n and d == n}
+        if self.complete is None:
+            self.complete = finished  # done before this session: not news
+        for title in [t for t, _, _ in self.plan_tasks if t in finished - self.complete]:
+            self.done_pending.append({'title': title, 'at': now()})
+        self.complete |= finished
+        commits = self.new_commits()
+        # the runner ticks a task's boxes, then commits it: the newest commits belong to
+        # the newest finished tasks, anything older is a commit of its own (review fixes, ...)
+        paired = min(len(commits), len(self.done_pending))
+        for h, subject in commits[:len(commits) - paired]:
+            self.event('commit', commit=h, subject=subject)
+        for pending, commit in zip(self.done_pending[:paired], commits[len(commits) - paired:]):
+            self.emit_done(pending, commit)
+        del self.done_pending[:paired]
+        self.flush_done()
+        step = self.step
+        if step and not step.get('announced') and now() - step['at'] > 20:
+            self.announce_step(timed_out=True)
+        idle = now() - self.last_output
+        if idle < 60:
+            self.stalled = False
+        elif not self.stalled and idle > STALL_S and not self.state.get('waiting') \
+                and not self.state.get('limit'):
+            self.stalled = True
+            self.event('stalled', minutes=round(idle / 60), task=self.task_position(
+                (self.state.get('tasks') or {}).get('current_task'))[0],
+                title=(self.state.get('tasks') or {}).get('current_task'),
+                section=self.state.get('section'))
+        self.save()
+
+    def flush_done(self, force=False):
+        """Report finished tasks whose commit did not show up within a minute."""
+        while self.done_pending and (force or now() - self.done_pending[0]['at'] > 60):
+            self.emit_done(self.done_pending.pop(0), None)
+
+    def emit_done(self, pending, commit):
+        title = pending['title']
+        index, count = self.task_position(title)
+        entry = self.state['task_log'].setdefault(
+            title, {'index': index, 'started': None, 'models': [], 'iterations': 0})
+        entry['done'] = now()
+        if commit:
+            entry['commit'] = f'{commit[0]} {commit[1]}'
+        minutes = round((entry['done'] - entry['started']) / 60) if entry.get('started') else None
+        entry['minutes'] = minutes
+        tasks = self.state.get('tasks') or {}
+        self.event('task-done', task=index, tasks=count, title=title, minutes=minutes,
+                   models=entry['models'], iterations=entry['iterations'],
+                   commit=commit[0] if commit else None, subject=commit[1] if commit else None,
+                   steps_done=tasks.get('done'), steps_total=tasks.get('total'))
+        self.safe_point(f'Task {index}/{count}' if index else title)
+
+    # -- waking the chat in charge
+    def needs_chat(self):
+        """Why the owner chat is needed now, or None: unseen news, an open prompt, an unreported end."""
+        w = watch_status(self.sdir)
+        if w['watched'] or w['reported'] or self.superseded_in_flow():
+            return None
+        if self.state.get('waiting'):
+            return 'a question is waiting'
+        if self.state.get('status') in ('done', 'failed', 'stopped'):
+            return f"the run ended ({self.state['status']})"
+        important = [e for e in events_since(self.sdir, self.state, w['seen'])
+                     if e['kind'] in WAKE_EVENTS]
+        return f'{len(important)} update(s) not seen' if important else None
+
+    def check_wake(self):
+        """Wake the owner chat when nobody watches and something needs it.
+
+        After its own usage limit, or when its turn ended without a watcher, nothing else wakes
+        an idle chat in most hosts. The supervisor is always alive, so it types one line into the
+        owner's terminal tab (any agent CLI reads it as a user message), or shows a desktop
+        notification when the tab cannot be typed into. Repeats every WAKE_EVERY_S until watched.
+        """
+        t = now()
+        if t - getattr(self, 'wake_checked', 0) < WAKE_CHECK_S:
+            return
+        self.wake_checked = t
+        mode = self.meta.get('wake') or wake_mode()
+        if mode == 'off':
+            return
+        why = self.needs_chat()
+        if not why:
+            self.unwatched_since = None
+            return
+        self.unwatched_since = getattr(self, 'unwatched_since', None) or t
+        if t - self.unwatched_since < WAKE_AFTER_S or t - getattr(self, 'woke_at', 0) < WAKE_EVERY_S:
+            return
+        self.woke_at = t
+        meta = read_json(self.sdir / 'session.json', {}) or self.meta
+        tab = meta.get('tab') if mode == 'type' else None
+        text = (f'autopilot: reattach to run {self.sdir.name} ({why}): run watch-status and '
+                'wait --catch-up, then post the missed updates')
+        how = 'notification'
+        if tab:
+            code, out = run_quiet(wake_argv(tab, text), timeout=20)
+            how = f"typed into the {tab['kind']} tab" if code == 0 else 'notification'
+            if code != 0:
+                self.state['wake_error'] = out[-200:]
+        if how == 'notification':
+            notify('autopilot', f'{self.sdir.name}: {why}. Open the chat that runs it.')
+        self.event('wake', how=how, why=why)
+
+    def superseded_in_flow(self):
+        """A later session of the same flow (a resume, a recovery restart) carries on."""
+        flow, root = self.meta.get('flow'), self.sdir.parent
+        return bool(flow) and any(
+            d.name > self.sdir.name and (read_json(d / 'session.json', {}) or {}).get('flow') == flow
+            for d in root.iterdir() if d.is_dir())
+
+    def linger(self):
+        """After the end, keep waking the owner chat until it has seen the end (bounded)."""
+        if (self.meta.get('wake') or wake_mode()) == 'off':
+            return
+        self.state['lingering'] = True
+        self.save()
+        end = now() + LINGER_S
+        while now() < end and self.needs_chat():
+            self.check_wake()
+            time.sleep(min(5, WAKE_CHECK_S))
+
+    def kill_child(self):
+        """Stop the runner's process group and reap it.
+
+        kill_tree checks liveness with signal 0, which an unreaped child (a zombie) still
+        passes; the Popen handle sees the exit, so stopping takes a moment, not 30 s.
+        """
+        proc = self.proc
+        if not proc or proc.poll() is not None:
+            return
+        if WINDOWS:
+            kill_tree(proc.pid)
+            return
+        try:
+            pgid = os.getpgid(proc.pid)
+        except ProcessLookupError:
+            return
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(pgid, sig)
+            except ProcessLookupError:
+                return
+            for _ in range(50):
+                if proc.poll() is not None:
+                    return
+                time.sleep(0.2)
+
+    def safe_point(self, where):
+        """A task or step just finished: stop here when the user asked to."""
+        if not self.state.get('stop_after') or self.stop_requested:
+            return
+        self.stop_requested = True
+        self.state['stopped_after'] = where
+        self.kill_child()
 
     # -- main loop
     def attempt(self):
@@ -2084,20 +2528,26 @@ class Supervisor:
             return exc
         self.state['status'] = 'running'
         self.event('started', attempt=self.state['attempt'])
-        tick = 0
+        if self.head is None:
+            self.plan_progress()
+            self.new_commits()
+        checked = now()
         while self.proc.poll() is None:
             self.process_inbox()
             prompt = self.detect_prompt()
             if prompt:
                 self.handle_prompt(prompt)
             self.check_deadline()
-            tick += 1
-            if tick % 25 == 0:
-                self.state['tasks'] = self.plan_progress()
-                self.save()
+            if now() - checked >= PROGRESS_S:
+                checked = now()
+                self.track_progress()
+                self.check_wake()
             time.sleep(0.2)
         time.sleep(0.3)  # let the reader drain
-        self.state['tasks'] = self.plan_progress()
+        self.track_progress()
+        self.flush_done(force=True)
+        self.announce_step(timed_out=True)
+        self.step = None
         return self.proc.returncode
 
     def classify(self):
@@ -2133,7 +2583,7 @@ class Supervisor:
             self.state['exit_code'] = rc
             if self.stop_requested:
                 self.state['status'] = 'stopped'
-                self.event('stopped')
+                self.event('stopped', after=self.state.get('stopped_after'))
                 return
             if rc == 0:
                 self.state['status'] = 'done'
@@ -2228,6 +2678,7 @@ class Supervisor:
                 self.state['status'] = 'stopped'
                 self.event('stopped')
                 return False
+            self.check_wake()
             time.sleep(0.5)
         return True
 
@@ -2292,6 +2743,7 @@ def cmd_supervise(args):
     sup = Supervisor(args.sdir)
     try:
         sup.run()
+        sup.linger()
     except Exception as exc:  # report, never leave a silent dead session
         sup.state['status'] = 'failed'
         sup.event('failed', error=f'supervisor crashed: {exc!r}', category='internal',
@@ -2314,6 +2766,7 @@ def report(sdir, st, since):
                     and not clean_line(l).startswith('=====')][-10:]
     alive = pid_alive(st.get('pid'))
     status, waiting = st.get('status'), st.get('waiting')
+    fresh = events_since(sdir, st, since)
     if answer_pending(sdir, st):
         status, waiting = 'running', None
     if status in ('running', 'waiting', 'restarting', 'starting') and not alive:
@@ -2321,7 +2774,8 @@ def report(sdir, st, since):
     return {
         'session': sdir.name, 'kind': meta.get('kind'), 'target': meta.get('target'),
         'status': status, 'seq': st.get('seq', 0),
-        'new_events': [e for e in st.get('events', []) if e['seq'] > since],
+        'new_events': [dict(e, line=event_line(e)) for e in fresh],
+        'updates': [event_line(e) for e in fresh if event_line(e)],
         'phase': st.get('phase'), 'section': st.get('section'), 'tasks': st.get('tasks'),
         'waiting': waiting, 'plan_file': st.get('plan_file'), 'flow': meta.get('flow'),
         'auto_answer_in_s': max(0, int(waiting['deadline'] - now()))
@@ -2334,6 +2788,251 @@ def report(sdir, st, since):
         'model': st.get('model'), 'executor': meta.get('executor'),
         'activity': activity, 'log': str(log),
     }
+
+
+def events_since(sdir, st, since):
+    """Events after since: from state (the last 40), or the full timeline when older."""
+    recent = st.get('events', [])
+    if not recent or recent[0]['seq'] <= since + 1:
+        return [e for e in recent if e['seq'] > since]
+    out = []
+    path = sdir / 'events.jsonl'
+    if path.exists():
+        for line in path.read_text(encoding='utf-8').splitlines():
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if e.get('seq', 0) > since:
+                out.append(e)
+    # a restart of the supervisor starts seq again: keep only the current run of numbers
+    seqs = [e['seq'] for e in out]
+    if seqs and seqs != sorted(seqs):
+        cut = max(i for i in range(1, len(seqs)) if seqs[i] < seqs[i - 1])
+        out = out[cut:]
+    return out or [e for e in recent if e['seq'] > since]
+
+
+def watch_status(sdir):
+    """Who watches a run, and how much the chat has not seen yet."""
+    meta = read_json(sdir / 'session.json', {}) or {}
+    st = read_json(sdir / 'state.json', {}) or {}
+    watcher = read_json(sdir / 'watcher.json', {}) or {}
+    seen = (read_json(sdir / 'seen.json', {}) or {}).get('seq', 0)
+    alive = session_active(st)
+    unseen = [e for e in events_since(sdir, st, seen) if event_line(e)]
+    tasks = st.get('tasks') or {}
+    return {'session': sdir.name, 'kind': meta.get('kind'), 'target': meta.get('target'),
+            'flow': meta.get('flow'), 'status': st.get('status') if alive or st.get('status') in
+            ('done', 'failed', 'stopped') else 'lost',
+            'alive': alive, 'owner': meta.get('owner'),
+            'watched': bool(watcher) and pid_alive(watcher.get('pid')),
+            'seen': seen, 'seq': st.get('seq', 0), 'unseen_updates': len(unseen),
+            'waiting': bool(st.get('waiting')), 'tasks': tasks,
+            'reported': bool((read_json(sdir / 'reported.json', {}) or {}).get('t'))}
+
+
+def cmd_watch_status(args):
+    """For the watchdog and the hooks: runs of this repo that need a chat's attention."""
+    if args.session:
+        emit({'sessions': [watch_status(session_dir(args.session))]})
+        return
+    root = state_root() / 'sessions'
+    repo = git_root()
+    out = []
+    if root.exists():
+        for d in sorted(root.iterdir(), reverse=True)[:40]:
+            meta = read_json(d / 'session.json', {}) or {}
+            if not meta or (repo and meta.get('repo') != repo):
+                continue
+            w = watch_status(d)
+            # live runs, and ended ones whose end the chat has not seen or reported
+            if w['alive'] or (w['unseen_updates'] and not w['reported']):
+                out.append(w)
+    emit({'sessions': out})
+
+
+def runs_needing_attention(cwd):
+    """watch_status of this repo's runs that are live and unwatched, or ended unseen."""
+    try:
+        os.chdir(cwd)
+    except OSError:
+        return []
+    repo = git_root()
+    root = state_root() / 'sessions'
+    if not repo or not root.exists():
+        return []
+    out = []
+    for d in sorted(root.iterdir(), reverse=True)[:40]:
+        meta = read_json(d / 'session.json', {}) or {}
+        # runs started before owners and watcher leases existed cannot tell who watches them
+        if meta.get('repo') != repo or 'owner' not in meta:
+            continue
+        w = watch_status(d)
+        if (w['alive'] and not w['watched']) or (
+                not w['alive'] and w['unseen_updates'] and not w['reported']):
+            out.append(w)
+    return out
+
+
+def describe_run(w, chat):
+    tasks = w.get('tasks') or {}
+    where = f" · {tasks.get('done')}/{tasks.get('total')} steps, now {tasks['current_task']}" \
+        if tasks.get('current_task') else ''
+    who = 'This chat started it' if w.get('owner') and w.get('owner') == chat \
+        else 'Another chat started it'
+    state = (f"is {w['status']}{where}; no chat is watching it" if w['alive']
+             else f"ended ({w['status']}) and its end was not reported yet")
+    return (f"autopilot {w['kind']} session {w['session']} ({w['target']}) {state}; "
+            f"{w['unseen_updates']} update(s) not posted yet. {who}.")
+
+
+def cmd_hook(args):
+    """Plugin hooks: tell a chat about runs nobody watches; keep the owner chat watching.
+
+    Fails open: any problem means no output, so a hook never blocks normal work.
+    """
+    try:
+        data = json.loads(sys.stdin.read() or '{}')
+    except ValueError:
+        data = {}
+    chat = data.get('session_id')
+    runs = runs_needing_attention(data.get('cwd') or os.getcwd())
+    if not runs:
+        return
+    ap = f'python3 "{SCRIPT}"'
+    if args.event == 'stop':
+        if data.get('stop_hook_active'):
+            return
+        mine = [w for w in runs if w.get('owner') and w['owner'] == chat]
+        if mine:
+            time.sleep(2)  # a wait started in the background a moment ago may not have its lease yet
+            mine = [w for w in mine if not watch_status(state_root() / 'sessions' / w['session'])
+                    ['watched'] or not w['alive']]
+        if not mine:
+            return
+        w = mine[0]
+        todo = (f"start `{ap} wait {w['session']} --catch-up --timeout 1500` in the background "
+                'and post its updates') if w['alive'] else \
+            (f"run `{ap} wait {w['session']} --catch-up`, post its updates and the final report, "
+             f"then `{ap} mark-reported {w['session']}`")
+        print(json.dumps({'decision': 'block',
+                          'reason': describe_run(w, chat) + f' Before ending the turn, {todo} '
+                          '(autopilot-run skill, "Staying in Charge").'}))
+        return
+    lines = [describe_run(w, chat) for w in runs]
+    lines.append(f'To take charge here, follow "Staying in Charge" in the autopilot-run skill: '
+                 f'`{ap} wait <session> --catch-up` posts what was missed. Answer the user first; '
+                 'in a chat that did not start the run, offer this instead of doing it.')
+    print(json.dumps({'hookSpecificOutput': {
+        'hookEventName': 'SessionStart' if args.event == 'session-start' else 'UserPromptSubmit',
+        'additionalContext': ' '.join(lines)}}))
+
+
+def cmd_mark_reported(args):
+    write_json(session_dir(args.session) / 'reported.json', {'t': now()})
+    emit({'ok': True})
+
+
+def model_label(model):
+    """'claude-opus-5-5 (xhigh)'; marks CLI defaults and router fallbacks."""
+    if not model or not (model.get('model') or model.get('cli')):
+        return 'runner default model'
+    left = (model.get('fallback') or {}).get('defaults') or model.get('defaults') or {}
+    name = model.get('model') or f"{model.get('cli')} default model"
+    if model.get('effort'):
+        label = f"{name} ({model['effort']})"
+    else:
+        label = f"{name} (default effort)" if 'effort' in left or model.get('fallback') else name
+    return label + (' [router fallback]' if model.get('fallback') else '')
+
+
+DEFAULT_WHY = {'default_not_reported': 'did not report it',
+               'default_for_other_model': 'reported it for another model'}
+
+
+def fallback_values(e):
+    """'model claude-opus-5-5 (verified default), effort unknown (claude did not report it)'."""
+    cli = e.get('cli') or 'the CLI'
+    out = []
+    for field in e.get('fields') or []:
+        d = (e.get('defaults') or {}).get(field) or {}
+        if d.get('value'):
+            how = 'verified default' if d.get('source') == 'verified_child_default' else d.get('source')
+            out.append(f"{field} {d['value']} ({how})")
+        else:
+            out.append(f"{field} unknown ({cli} {DEFAULT_WHY.get(d.get('why'), 'did not report it')})")
+    return ', '.join(out) or f'{cli} defaults'
+
+
+def event_line(e):
+    """The fixed one-line chat update for an event; None for events the chat skips."""
+    k = e['kind']
+    task = f"Task {e.get('task') or '?'}/{e.get('tasks') or '?'}"
+    # "### Task 2: Seed migration" -> "Seed migration": the number is already in `task`
+    title = re.sub(r'^Task\s+\d+\s*[:.\-–]?\s*', '', e.get('title') or '') or e.get('title') or '?'
+    steps = f"steps {e['steps_done']}/{e['steps_total']}" if e.get('steps_total') else None
+    if k == 'task-start':
+        how = f"continued (iteration {e['iteration']})" if e.get('continued') and e.get('iteration') \
+            else 'continued' if e.get('continued') else 'started'
+        return ' · '.join(x for x in (f"▶ {task} {how}: {title}",
+                                      model_label(e.get('model')), steps) if x)
+    if k == 'task-done':
+        took = f" in {e['minutes']} min" if e.get('minutes') is not None else ''
+        commit = f"{e['commit']} {e['subject']}" if e.get('commit') else 'no commit yet'
+        models = ', '.join(e.get('models') or []) or 'runner default model'
+        return ' · '.join(x for x in (f"✓ {task} done{took}: {title}",
+                                      models, steps, commit) if x)
+    if k == 'phase-start':
+        return f"▶ {e['phase'][:1].upper()}{e['phase'][1:]}: {e['section']} · {model_label(e.get('model'))}"
+    if k == 'commit':
+        return f"• Commit {e['commit']}: {e['subject']}"
+    if k == 'router-fallback':
+        where = f"{task}: {title}" if e.get('title') else e.get('section') or 'this step'
+        code = ', '.join(x for x in (e.get('code'), e.get('stage') and f"{e['stage']} stage") if x)
+        why = (e.get('message') or 'routing failed') + (f' ({code})' if code else '')
+        return (f"⚠ Router fallback on {where}: {why}. Not chosen by agrouter; "
+                f"runs on {e.get('cli') or 'CLI'} defaults: {fallback_values(e)}.")
+    if k == 'router-warning':
+        return f"⚠ Router: {e.get('text')}"
+    if k == 'stalled':
+        where = f"{task}: {title}" if e.get('title') else e.get('section') or 'the run'
+        return f"⚠ No output for {e['minutes']} min on {where}. Checking the log."
+    if k == 'restart':
+        delay = f" in {e['delay_s']} s" if e.get('delay_s') else ''
+        of = f" of {e['max_restarts']}" if e.get('max_restarts') else ''
+        return (f"⚠ Attempt failed ({e.get('category')}): {e.get('error')}. "
+                f"Restarting{delay} (restart {e.get('restart')}{of}); finished tasks are kept.")
+    if k == 'failed':
+        return f"✗ Run failed ({e.get('category')}): {e.get('error')}"
+    if k == 'stopped':
+        if e.get('after'):
+            return f"■ Stopped after {e['after']}. Say \"resume\" to continue from the next one."
+        return '■ Run stopped.'
+    if k == 'stop-queued':
+        where = f"{task} finishes ({title})" if e.get('title') else \
+            f"the current step finishes ({e.get('section') or 'now'})"
+        return f"⏸ Will stop after {where}."
+    if k == 'stop-cancelled':
+        return '▶ Stop cancelled; the run continues.'
+    if k == 'done':
+        return '✓ Run finished. Writing the final report.'
+    if k == 'limit':
+        wait = f", next try in {max(1, round(e['wait_s'] / 60))} min" if e.get('wait_s') else ''
+        resets = f", resets {e['resets']}" if e.get('resets') else ''
+        return (f"⏸ Usage limit ({e.get('tool') or 'model'}): {e.get('pattern')}{resets}{wait}. "
+                'Finished tasks are kept.')
+    if k == 'limit-cleared':
+        return f"▶ Limit cleared after {e.get('minutes')} min; work continues."
+    if k == 'auto-answered':
+        return f"⏱ No reply: answered \"{e.get('summary')}\". {e.get('reason') or ''}".strip()
+    if k == 'review-skipped':
+        return f"• External review skipped ({e.get('how')})."
+    if k == 'error':
+        return f"⚠ {e.get('line')}"
+    if k == 'wake':
+        return None  # for the chat that was asleep: the catch-up shows what happened
+    return None
 
 
 def answer_pending(sdir, st):
@@ -2366,11 +3065,23 @@ def cmd_wait(args):
     """
     sdir = session_dir(args.session)
     since = args.since
+    if args.catch_up:
+        since = (read_json(sdir / 'seen.json', {}) or {}).get('seq', 0)
     if since is None:
         since = (read_json(sdir / 'state.json', {}) or {}).get('seq', 0)
     end = now() + args.timeout
+    # one watcher per run: a newer wait replaces an older one, which then exits quietly
+    me = {'pid': os.getpid(), 'owner': host_session_id(), 'since': since, 'started': now()}
+    write_json(sdir / 'watcher.json', me)
+    meta = read_json(sdir / 'session.json', {}) or {}
+    tab = own_tab()
+    if meta and ((me['owner'] and meta.get('owner') != me['owner']) or (tab and meta.get('tab') != tab)):
+        # the chat that watches now is the one in charge, in the tab it runs in
+        meta['owner'] = me['owner'] or meta.get('owner')
+        meta['tab'] = tab or meta.get('tab')
+        write_json(sdir / 'session.json', meta)
     quiet = {'section', 'started', 'answered', 'auto-answer', 'waiting', 'limit-retry',
-             'transient', 'extended'}
+             'transient', 'extended', 'wake'}
     while True:
         st = read_json(sdir / 'state.json', {}) or {}
         fresh = [e for e in st.get('events', []) if e['seq'] > since]
@@ -2386,8 +3097,16 @@ def cmd_wait(args):
             break
         if now() >= end:
             break
+        if (read_json(sdir / 'watcher.json', {}) or {}).get('pid') != os.getpid():
+            emit({'session': sdir.name, 'superseded': True,
+                  'note': 'a newer wait watches this run; nothing to report'})
+            return
         time.sleep(1)
+    if (read_json(sdir / 'watcher.json', {}) or {}).get('pid') == os.getpid():
+        (sdir / 'watcher.json').unlink(missing_ok=True)
     out = report(sdir, st, since)
+    if since <= out['seq']:  # it reported everything between since and seq
+        write_json(sdir / 'seen.json', {'seq': out['seq'], 't': now()})
     out['heartbeat'] = not [e for e in out['new_events'] if e['kind'] not in quiet] \
         and not new_prompt and out['status'] not in ('done', 'failed', 'stopped', 'lost')
     emit(out)
@@ -2570,8 +3289,15 @@ def cmd_ask_timer(args):
 def cmd_log(args):
     """Record an agent decision (recovery, fix, choice) in the session's decision log."""
     sdir = session_dir(args.session)
+    extra = {}
+    if args.question:
+        extra['question'] = one_line(args.question)
+    if args.waited is not None:
+        extra['waited_min'] = args.waited
+    if args.by == 'auto':
+        extra['recommended'] = True
     log_decision(sdir, kind=args.kind, by=args.by, text=one_line(args.text),
-                 reason=one_line(args.reason) if args.reason else None)
+                 reason=one_line(args.reason) if args.reason else None, **extra)
     emit({'ok': True})
 
 
@@ -2618,6 +3344,8 @@ def cmd_report(args):
             'minutes': round(((st.get('ended') or now()) - meta.get('created', now())) / 60, 1),
             'attempts': st.get('attempt'), 'tasks': st.get('tasks'),
             'executor': meta.get('executor'), 'models_used': st.get('models_used', {}),
+            'task_log': st.get('task_log', {}),
+            'router_fallbacks': st.get('router_fallbacks', []),
             'restarts': st.get('restarts', []), 'last_error': st.get('last_error'),
             'errors': st.get('errors', []), 'phases': [
                 e['section'] for e in st.get('events', []) if e['kind'] == 'section'],
@@ -2630,6 +3358,12 @@ def cmd_report(args):
                 except ValueError:
                     pass
     decisions.sort(key=lambda e: e.get('t', ''))
+    # every choice taken on a timeout, by the supervisor or by the agent, for its own section
+    timeouts = [{'t': d.get('t'), 'session': d['session'], 'kind': d.get('prompt') or d.get('kind'),
+                 'question': d.get('question'), 'chosen': d.get('answer') or d.get('text'),
+                 'waited_min': d.get('waited_min'), 'recommended': d.get('recommended'),
+                 'reason': d.get('reason')}
+                for d in decisions if d.get('by') == 'auto']
     git = {}
     if repo:
         base = default_branch(repo)
@@ -2641,12 +3375,21 @@ def cmd_report(args):
             _, stat = run_quiet(['git', 'diff', '--stat', f'{base}...HEAD'], cwd=repo)
             git['commits'] = commits.splitlines()[:60]
             git['diffstat'] = stat.splitlines()[-25:]
-    emit({'flow': flow, 'sessions': sessions, 'decisions': decisions, 'git': git})
+    emit({'flow': flow, 'sessions': sessions, 'decisions': decisions, 'timeouts': timeouts,
+          'git': git})
 
 
 def cmd_stop(args):
     sdir = session_dir(args.session)
     st = read_json(sdir / 'state.json', {}) or {}
+    if args.after_task or args.cancel:
+        if not session_active(st):
+            die('the session is not running')
+        (sdir / 'inbox' / f'{time.time_ns()}.json').write_text(json.dumps(
+            {'stop_after_task': bool(args.after_task), 'by': args.by, 'reason': args.reason}))
+        emit({'ok': True, 'session': sdir.name,
+              'status': 'stop queued' if args.after_task else 'stop cancelled'})
+        return
     if pid_alive(st.get('pid')):
         inbox = sdir / 'inbox'
         (inbox / f'{time.time_ns()}.json').write_text(json.dumps({'stop': True}))
@@ -2658,6 +3401,21 @@ def cmd_stop(args):
     if pid_alive(st.get('child_pid')):
         kill_tree(st.get('child_pid'))
     emit({'ok': True, 'session': sdir.name, 'status': 'stopped'})
+
+
+def cmd_resume(args):
+    """Start a stopped or failed run again: same plan, flags and flow, from the first open task."""
+    sdir = session_dir(args.session)
+    meta = read_json(sdir / 'session.json', {}) or {}
+    st = read_json(sdir / 'state.json', {}) or {}
+    if meta.get('kind') != 'run':
+        die('only run sessions can be resumed; start planning again with plan')
+    if session_active(st):
+        die('the session is still running')
+    os.chdir(meta['repo'])
+    write_json(sdir / 'reported.json', {'t': now(), 'by': 'resume'})  # the new session carries on
+    start_session('run', meta['target'], meta.get('cli_args', []), meta.get('max_restarts', 5),
+                  meta.get('flow'))
 
 
 def cmd_shim(args):
@@ -2716,7 +3474,21 @@ def main(argv=None):
     s.add_argument('--timeout', type=int, default=240)
     s.add_argument('--since', type=int)
     s.add_argument('--any', action='store_true', help='also return on phase changes')
+    s.add_argument('--catch-up', action='store_true',
+                   help='start after the last event a wait reported (reattaching)')
     s.set_defaults(fn=cmd_wait)
+    s = sub.add_parser('watch-status')
+    s.add_argument('session', nargs='?')
+    s.set_defaults(fn=cmd_watch_status)
+    s = sub.add_parser('mark-reported')
+    s.add_argument('session')
+    s.set_defaults(fn=cmd_mark_reported)
+    s = sub.add_parser('resume')
+    s.add_argument('session')
+    s.set_defaults(fn=cmd_resume)
+    s = sub.add_parser('hook')
+    s.add_argument('event', choices=['session-start', 'prompt', 'stop'])
+    s.set_defaults(fn=cmd_hook)
     s = sub.add_parser('answer')
     s.add_argument('session')
     s.add_argument('--choice', type=int)
@@ -2742,7 +3514,10 @@ def main(argv=None):
                    choices=['decision', 'recovery', 'fix', 'answer', 'note'])
     s.add_argument('--text', required=True)
     s.add_argument('--reason')
-    s.add_argument('--by', default='agent')
+    s.add_argument('--by', default='agent',
+                   help='user, agent, or auto (taken on a timeout without a reply)')
+    s.add_argument('--question', help='what was asked (for timeout decisions)')
+    s.add_argument('--waited', type=float, help='minutes without a reply before a timeout decision')
     s.set_defaults(fn=cmd_log)
     s = sub.add_parser('skip-review')
     s.add_argument('session')
@@ -2782,6 +3557,11 @@ def main(argv=None):
     s.set_defaults(fn=cmd_report)
     s = sub.add_parser('stop')
     s.add_argument('session')
+    s.add_argument('--after-task', action='store_true',
+                   help='stop once the current task (or review step) is finished and committed')
+    s.add_argument('--cancel', action='store_true', help='cancel a queued --after-task stop')
+    s.add_argument('--by', default='user')
+    s.add_argument('--reason')
     s.set_defaults(fn=cmd_stop)
     s = sub.add_parser('list')
     s.add_argument('--all', action='store_true')

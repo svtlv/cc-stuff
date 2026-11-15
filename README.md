@@ -6,7 +6,7 @@ A public collection of plugins for developer workflows. See each plugin for its 
 
 | Plugin | Description | Version |
 |--------|-------------|---------|
-| [autopilot](./autopilot/) | Plan a task with you, explain the plan, then implement it autonomously under supervision with automatic restarts and live status; includes guided setup of the plan runner and model router | 0.1.0 |
+| [autopilot](./autopilot/) | Plan a task with you, explain the plan, then implement it autonomously under supervision with automatic restarts and live status; includes guided setup of the plan runner and model router | 0.2.0 |
 | [code-explainer](./code-explainer/) | Explain code and plans with diagrams and tables, summarize files, folders, designs, text and chats in short linked bullets, or combine both in one report | 0.3.0 |
 | [partner-agents](./partner-agents/) | Run AI agents as equal partners in their own terminal tabs (Orca-aware), debating every decision with you, with an exclusive write baton | 1.1.0 |
 | [pr-review-toolkit](./pr-review-toolkit/) | Address supplied review feedback or fetch GitHub PR and Orca editor comments in Claude Code and Codex | 0.7.1 |

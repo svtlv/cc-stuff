@@ -4,7 +4,7 @@ description: This skill should be used when the user runs "/autopilot-plan" or "
 argument-hint: "[task description | --redesign <file>] [-- extra runner flags]"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, Agent
 metadata:
-  version: "0.1.0"
+  version: "0.2.0"
 ---
 
 # Autopilot Plan
@@ -93,11 +93,10 @@ minutes. Keep the returned `session` id.
 
 ## Step 4 — Relay Until Done
 
-Loop on `AP wait <session> --since <seq> --timeout 240` as described in
-`monitoring.md`, in the way the host supports (`hosts.md`).
-Post a one-line heartbeat when nothing happened ("Still planning · 4 min ·
-reading pkg/store and the tests · on claude-opus-5-5 (high)"), adding the
-`model` agrouter selected when the report has one. Rate limits during
+Loop on `AP wait <session> --since <seq> --timeout 1500` as described in
+`monitoring.md`, in the way the host supports (`hosts.md`). Post the
+report's `updates` as is (for example "▶ Planning: plan iteration 1 ·
+claude-opus-5-5 (high)") and nothing on heartbeats. Rate limits during
 planning are handled as in a run ("Planning Sessions" in `limits.md`). Act on the report:
 
 Every prompt follows "Unattended Defaults" in `monitoring.md`: pick a

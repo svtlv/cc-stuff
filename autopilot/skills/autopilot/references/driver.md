@@ -35,9 +35,16 @@ wrapper pair, Python selection and review-skip recovery.
 | `extend SESSION (--by 30m \| --never)` | More time for the open prompt, or no auto-answer for it. |
 | `ask-timer start\|wait\|cancel\|extend --id ID [--decision KEY] [--seconds 1h] [--max S] [--by 30m] [--never]` | Timers for agent-level questions; `wait` returns `reminder`, `pending` (chunk over), `expired`, `cancelled` or `never`. |
 | `policy` | Effective response-time policy after the config file and `AUTOPILOT_TIMEOUTS`. |
-| `log SESSION --kind decision\|recovery\|fix\|note --text TEXT [--reason TEXT]` | Append an agent decision to the session's `decisions.jsonl`. |
+| `log SESSION --kind decision\|recovery\|fix\|note --text TEXT [--reason TEXT] [--by user\|agent\|auto] [--question TEXT] [--waited MIN]` | Append an agent decision to the session's `decisions.jsonl`. `--by auto` marks a choice taken on a timeout without a reply; add the question and the minutes waited. |
 | `timer SECONDS` | Sleep, for timing agent-level questions. |
-| `report [SESSION] [--flow ID]` | Every session of a flow (with executor and `models_used` call counts), the merged decision log, and the branch's commits and diffstat: input for the final report. |
+| `stop SESSION --after-task \| --cancel [--by user\|agent] [--reason TEXT]` | Stop once the current task is done and committed (in a review phase: when the review round ends), or cancel that. Events `stop-queued`, `stop-cancelled`, then `stopped` with `after`. |
+| `resume SESSION` | Start a stopped or failed run again: same plan, flags and flow, from the first open task. Returns the new session. |
+| `wait SESSION --catch-up` | Start after the last event any wait reported (`seen.json`), reading the full timeline (`events.jsonl`) when it is older than the last 40 events. Every wait holds the run's watcher lease (`watcher.json`, with the chat id); a newer wait takes it over and the older returns `{"superseded": true}`. |
+| `watch-status [SESSION]` | Per run: `alive`, `status` (`lost` when the supervisor died), `watched`, `owner`, `seen`, `seq`, `unseen_updates`, `reported`. Without SESSION: the repository's live runs and its ended, unreported ones. |
+| `mark-reported SESSION` | The final report was posted: hooks and the watchdog stop asking for it. |
+| `hook prompt\|stop` | Plugin hook entry (stdin: hook input JSON). See `control.md`. |
+| (supervisor) | Records the owner's terminal tab (`tab` in `session.json`). Unwatched for `AUTOPILOT_WAKE_AFTER_S` (600) with news, it types the wake line into that tab or notifies, every `AUTOPILOT_WAKE_EVERY_S` (1200); after the end it lingers up to `AUTOPILOT_LINGER_S` (6 h) until reported. `AUTOPILOT_WAKE=type\|notify\|off` or `[wake] mode`. Event `wake` (`how`, `why`). |
+| `report [SESSION] [--flow ID]` | Every session of a flow (with executor and `models_used` call counts), the merged decision log, `timeouts` (every choice taken without a reply: question, chosen, `waited_min`, `recommended` false when the driver fell back to the first option or a blind accept, reason), and the branch's commits and diffstat: input for the final report. |
 | `stop SESSION` | Interrupt the CLI gracefully, then kill its process tree. |
 | `list [--all]` | Sessions of this repository (`--all`: every repository). |
 | `config-set FILE KEY [--section S] (--value V \| --value-stdin) [--private]` | Set one INI key, uncommenting a template line when one exists. `--private` makes the file 0600 and its directory 0700. Use `--value-stdin` for secrets. |
@@ -74,7 +81,8 @@ plan draft and `draft-edited.md` an editable copy.
 |---|---|
 | `status` | `running`, `waiting` (needs an answer), `restarting`, `done`, `failed`, `stopped`, `lost` (supervisor died) |
 | `seq` | Event counter. Pass it back as `--since` on the next `wait`. |
-| `new_events` | Events after `--since`: `section`, `waiting`, `answered`, `auto-answered` (deadline passed), `auto-answer` (plan's "continue?"), `needs-input` (free-text prompt without a default), `error`, `restart`, `failed`, `done`, `stopped`, `stale-answer` |
+| `new_events` | Events after `--since`, each with its fixed `line` (null when the chat skips it): `task-start` (task, tasks, title, model, iteration, continued, steps), `task-done` (task, title, minutes, models, commit, subject, steps), `phase-start` (section, phase, model), `commit` (outside a task), `router-fallback` (agrouter could not route: `code`, `stage`, `message`, `fields` left to the CLI and their `defaults` with value and source), `router-warning` (other `agrouter: warning:` lines, not errors), `stalled` (no output for `AUTOPILOT_STALL_S`, 20 min), `section`, `waiting`, `answered`, `auto-answered` (deadline passed), `auto-answer` (plan's "continue?"), `needs-input` (free-text prompt without a default), `error`, `restart`, `limit`, `limit-cleared`, `failed`, `done`, `stopped`, `stale-answer` |
+| `updates` | The non-null `line`s of `new_events`, in order: what the chat posts |
 | `auto_answer_in_s`, `auto_answer` | Seconds until the open prompt is answered by default (null: never), and its policy key |
 | `flow` | Flow id shared by the sessions of one full run |
 | `phase`, `section` | Friendly phase (`planning`, `implementing tasks`, `code review`, `external review`, `finalizing`) and the raw section header, such as `task iteration 3` |
@@ -84,8 +92,8 @@ plan draft and `draft-edited.md` an editable copy.
 | `attempt`, `restarts`, `last_error`, `recent_errors` | Restart bookkeeping and the CLI's own error lines |
 | `activity` | Last ten output lines without timestamps: the source for "what it is doing now" |
 | `limit` | Active rate-limit episode (tool, message, `resets`, `resets_in_s`, `retries`, `next_retry_in_s`, `handled_by`), or null. See `limits.md`. |
-| `executor`, `model` | The run's executor (`claude` or `codex`) and what runs right now (`cli`, `model`, `effort`, from the router's selection line or the Codex banner) |
-| `heartbeat` | True when the timeout passed with nothing new |
+| `executor`, `model` | The run's executor (`claude` or `codex`) and what runs right now (`cli`, `model`, `effort`, from the router's selection line or the Codex banner). Values agrouter left to the CLI are filled from the selection's `effective` part; `fallback` is set when routing failed |
+| `heartbeat` | True when the timeout passed with nothing new: post nothing |
 | `log` | Path of `output.log` |
 
 `failed` events carry `reason`: `needs a fix before it can continue` (a

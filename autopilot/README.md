@@ -42,8 +42,10 @@ agent ──► autopilot.py plan|run ──► detached supervisor ──► ru
 **Note:** planning and the run both go through this path, so agrouter
 picks the model for plan creation as well as for tasks and reviews (unless
 `plan_model` pins it). The supervisor keeps the runner alive between agent turns. The
-agent polls with `wait` (returns on events or every 4 minutes) and replies
-with `answer`.
+agent keeps one `wait` in flight (it returns on milestones: a task starts or
+finishes, with the model agrouter picked, a review, a commit, a router
+fallback, a problem) and replies with `answer`. Each milestone is one fixed
+chat line; nothing is posted on a timer.
 
 | Situation | Behavior |
 |---|---|
@@ -61,6 +63,8 @@ with `answer`.
 | Same error three times with no progress | The driver stops; the agent diagnoses and fixes. |
 | Driver gives up (fatal error, restart limit) | The agent recovers on its own: known fixes (worktree instead of a dirty tree, stale worktree cleanup, config fixes, router bypass when the key fails) or a diagnosed code/plan fix committed on the run's branch, then starts again. Up to 3 rounds; never destructive git commands. |
 | You don't answer | Each question has a recommended answer, chosen with a reason, and a response time that fits it: 10 min for planner questions, 30 min for the plan draft, 60 min to decide whether to implement (reminders before the long ones; say "wait" for more). Then the recommendation is taken and the work continues to the end. Times are configurable in `~/.config/autopilot/config`. Installing software and credentials always wait for you. |
+| You ask about or change the run mid-way | The chat that started it stays in charge: it answers from the log and the branch's commits while the run continues. Code, plan or model changes go through a safe point: "pause after this task", change, "resume". |
+| The chat hits its own usage limit, or you open a new chat | The run continues by itself. When no chat has watched for 10 minutes and there is news, the supervisor types a wake line into the chat's terminal tab (Orca tab, tmux, WezTerm, kitty, iTerm2, or your own `[wake] command`), which works for Claude Code, Codex or any other agent CLI; otherwise it shows a desktop notification. The chat then posts the updates you missed. |
 | Flow ends (any outcome) | A full report: summary, decisions with who made them and why, a walkthrough of what was built, problems and recoveries, next steps. Saved next to the session state. |
 
 In hosts that notify on background commands (Claude Code) the monitor runs
@@ -68,6 +72,16 @@ in the background, so you can keep chatting during a run; elsewhere it runs
 in the foreground with commentary updates (see the table under Install).
 When the host supports subagents, autopilot may use read-only subagents to
 diagnose failures while the run continues.
+
+### Hooks
+
+The plugin ships `UserPromptSubmit` and `Stop` hooks (`hooks/hooks.json`,
+the schema Claude Code and Codex share). They print nothing unless a run in
+the repository has no chat watching it, or ended without a report. Then they
+tell the chat, and keep the chat that started the run from ending its turn
+without a watcher. Codex runs them after you trust them in its hook review.
+Hosts without hooks still get the typed wake line. See
+[control.md](skills/autopilot/references/control.md).
 
 Session state lives in `~/.local/state/autopilot/` (`%LOCALAPPDATA%\autopilot`
 on Windows; `AUTOPILOT_STATE_DIR` overrides), outside the repository.
@@ -174,6 +188,10 @@ other way round.
   integration run.
 - Planning runs through the runner's numbered-answer fallback, so the
   planner's questions arrive as plain text, not a fuzzy picker.
+- Waking by typing needs a terminal that can be typed into from outside
+  (or a `[wake] command`); elsewhere you get a desktop notification on macOS
+  and Linux, none on Windows. A closed terminal leaves the run going; the
+  hooks or `/autopilot-run` pick it up in the next chat in the repository.
 - Restarts rely on the runner resuming from the first unchecked task; a run
   in `--worktree` mode that is interrupted keeps its worktree, which blocks a
   restart until it is removed (reported as a fatal error with the fix).
