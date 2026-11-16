@@ -4,7 +4,7 @@ description: This skill should be used when the user runs "/autopilot-setup" or 
 argument-hint: "[tools | key | repo | reconfigure] (default: all, or reconfigure when the repository is already set up)"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion
 metadata:
-  version: "0.3.0"
+  version: "0.4.0"
 ---
 
 # Autopilot Setup
@@ -163,9 +163,11 @@ value (from `AP config-summary`) as the "keep" option. Ask, in order:
      none. When Codex is configured but not usable, explain that runs skip
      it automatically, and offer to fix it (install, `codex login`) or set
      `none`.
-   - **Plan review**: the other model (`plan_review.cross_model`) reviews
-     each plan draft read-only. Recommend `auto` when that model is usable,
-     otherwise `off`. Write it with
+   - **Plan review**: after ralphex writes the plan, autopilot offers one
+     read-only review of it, as `/planning:make` does: external (the other
+     model, `plan_review.cross_model`) or same agent. This key sets the
+     recommended reviewer. Recommend `auto` (external) when that model is
+     usable, otherwise `off` (recommends no review). Write it with
      `AP config-set .autopilot/config plan --section review --value auto`.
      Honor a request to skip either model's review. An existing enabled
      review whose CLI is unavailable is skipped without blocking the run;

@@ -36,16 +36,18 @@ standard library only) sits between them:
 agent ──► autopilot.py plan|run ──► detached supervisor ──► runner CLI
   ▲                                   │  stdin pipe, fzf/editor shims
   │                                   ▼
-  └──── autopilot.py wait ◄──── state.json + output.log
+  └──── autopilot.py next ◄──── state.json + output.log
   └──── autopilot.py answer ───► inbox ───► supervisor ───► runner stdin
 ```
 **Note:** planning and the run both go through this path, so agrouter
 picks the model for plan creation as well as for tasks and reviews (unless
 `plan_model` pins it). The supervisor keeps the runner alive between agent turns. The
-agent keeps one `wait` in flight (it returns on milestones: a task starts or
+agent keeps one `next` in flight (it returns on milestones: a task starts or
 finishes, with the model agrouter picked, a review, a commit, a router
-fallback, a problem) and replies with `answer`. Each milestone is one fixed
-chat line; nothing is posted on a timer.
+fallback, a problem, or a runner prompt it has not shown yet) and replies
+with `answer`. Each milestone is one fixed chat line; nothing is posted on a
+timer. `next` prints a few lines of plain text and returns only on news, so
+a waiting chat costs no tokens.
 
 | Situation | Behavior |
 |---|---|
@@ -56,9 +58,9 @@ chat line; nothing is posted on a timer.
 | Run fails (crash, kill, network) | Restarted after 30 s, 60 s, 120 s … up to 5 times; finished tasks are kept. |
 | Codex can't do the external code review (not installed, logged out) | Setup tells you up front; runs skip the review automatically and say why. If Codex fails mid-review, the run restarts without it, keeping finished tasks. |
 | You want to skip the external review | Say so: before the run it starts without it; during the run it ends the review at once (ralphex's manual break) or as soon as the review starts. |
-| Plan review | Optional (setup asks): the other model (Codex in the Claude setup, Claude in the Codex setup) reviews each plan draft read-only, and its findings shape the recommendation. |
+| Plan review | After ralphex writes the plan, autopilot offers one read-only review, as `/planning:make` does: external (Codex in the Claude setup, Claude in the Codex setup) or same agent. You see each finding with an assessment and pick which to apply. Drafts are not reviewed by another model, so planning stays one question at a time. |
 | Only Codex is available | Setup recommends Codex and skips unavailable Claude plan reviews. Claude availability includes login and router checks. A Claude-configured session can fall back to Codex when its sandbox and routing support execution; otherwise setup explains what to change. |
-| You want to skip a plan review | Say "skip the Claude review", "skip the Codex review", or "skip the plan review". Planning continues and the skip is logged. A missing or logged-out reviewer is skipped automatically. |
+| You want to skip a plan review | Say "skip the Claude review", "skip the Codex review", or "skip the plan review". The plan is kept as written and the skip is logged. A missing or logged-out reviewer is skipped automatically. |
 | Usage limit | ralphex retries the same step every 15 minutes (autopilot adds `--wait` when your config lacks `wait_on_limit`); if ralphex exits instead, autopilot waits until the reported reset time and restarts. You see which tool is limited and when it resets, never a false "hung" or error. A reset hours away gets a decision with a 5-minute default: continue on Codex, skip the limited external review, or wait. |
 | Same error three times with no progress | The driver stops; the agent diagnoses and fixes. |
 | Driver gives up (fatal error, restart limit) | The agent recovers on its own: known fixes (worktree instead of a dirty tree, stale worktree cleanup, config fixes, router bypass when the key fails) or a diagnosed code/plan fix committed on the run's branch, then starts again. Up to 3 rounds; never destructive git commands. |

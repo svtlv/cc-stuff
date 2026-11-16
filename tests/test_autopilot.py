@@ -302,6 +302,50 @@ class AutopilotDriver(unittest.TestCase):
             since = rep['seq']
         self.fail(f'never reached {status}: {rep}')
 
+    def next_report(self, sid, timeout=20):
+        res = subprocess.run([sys.executable, str(DRIVER), 'next', sid, '--timeout', str(timeout)],
+                             cwd=self.repo, env=self.env, capture_output=True, text=True,
+                             encoding='utf-8', timeout=60)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return res.stdout
+
+    def test_next_wakes_once_per_prompt_with_short_text(self):
+        sid = self.drive('plan', '--desc', 'add caching')['session']
+        deadline = time.time() + 30
+        text = ''
+        while 'PROMPT' not in text and time.time() < deadline:
+            text = self.next_report(sid)
+        self.assertIn('PROMPT question', text)
+        self.assertIn('question: Which cache backend?', text)
+        self.assertIn('  2. In-memory, local', text)
+        self.assertIn('recommended: none registered', text)
+        self.assertIn(f'answer: AP answer {sid} --choice N', text)
+        self.assertLess(len(text), 1500)
+        # the same prompt does not wake the chat again: only the timeout ends this call
+        self.assertIn('NO NEWS', self.next_report(sid, timeout=2))
+        # a new chat reattaching sees the open prompt again
+        res = subprocess.run([sys.executable, str(DRIVER), 'next', sid, '--catch-up', '--timeout', '5'],
+                             cwd=self.repo, env=self.env, capture_output=True, text=True, timeout=60)
+        self.assertIn('PROMPT question (id', res.stdout)
+        self.drive('recommend', sid, '--choice', '2', '--reason', 'no new service')
+        self.drive('answer', sid, '--choice', '2')
+        text = ''
+        while 'PROMPT draft' not in text and time.time() < deadline:
+            text = self.next_report(sid)
+        self.assertIn('draft: ', text)
+        self.assertIn('--action revise --text', text)
+        feedback = self.repo.parent / 'feedback.txt'
+        feedback.write_text('keep $(NoWarn) as is\nand split', encoding='utf-8')
+        self.drive('answer', sid, '--action', 'revise', '--text-file', str(feedback))
+        while 'PROMPT draft' not in (text := self.next_report(sid)) and time.time() < deadline:
+            pass
+        self.drive('answer', sid, '--action', 'accept')
+        while 'DONE' not in text and time.time() < deadline:
+            text = self.next_report(sid)
+        self.assertIn('DONE · plan file: docs/plans/cache.md', text)
+        log = Path(self.drive('wait', sid, '--timeout', '1')['log']).read_text()
+        self.assertIn('FEEDBACK: keep $(NoWarn) as is and split', log)
+
     def test_plan_question_revise_edit_accept(self):
         sid = self.drive('plan', '--desc', 'add caching')['session']
         rep = self.until(sid, 'waiting')
@@ -1279,18 +1323,35 @@ class ReviewPlan(unittest.TestCase):
                 Path(__file__).with_name('prompt.txt').write_text(sys.stdin.read(), encoding='utf-8')
                 print('args: ' + ' '.join(sys.argv[1:]))
                 print('- [high] Task 1 has no test step -> add one')
+                print('MAJOR: Task 2 - wrong file path')
+                print('  src/a.py does not exist -> use src/b.py')
+                # codex echoes the prompt (with its severity words) on stderr
+                sys.stderr.write('CRITICAL: the plan, as written, fails\\nMAJOR: Task 2 - wrong file path\\n')
                 '''))
             cfg = base / 'autopilot.cfg'
             cfg.write_text('[review]\nplan = auto\n')
             env = dict(os.environ, PATH=f"{fakebin}{os.pathsep}{os.environ['PATH']}",
                        AUTOPILOT_CONFIG=str(cfg), AUTOPILOT_STATE_DIR=str(base / 'state'),
                        RALPHEX_CONFIG_DIR=str(base / 'none'), AGROUTER_CONFIG_DIR=str(base / 'none'))
+            sdir = base / 'state' / 'sessions' / 's1'
+            sdir.mkdir(parents=True)
+            (sdir / 'session.json').write_text('{}')
             res = subprocess.run([sys.executable, str(DRIVER), 'review-plan', 'plan.md',
-                                  '--task', 'add caching'], cwd=repo, env=env,
-                                 capture_output=True, text=True)
+                                  '--task', 'add caching', '--reviewer', 'external',
+                                  '--session', str(sdir)], cwd=repo,
+                                 env=env, capture_output=True, text=True)
             out = json.loads(res.stdout)
             self.assertEqual(out['reviewer'], 'codex')
-            self.assertEqual(out['findings'], ['- [high] Task 1 has no test step -> add one'])
+            self.assertEqual(out['review'], 'external')
+            self.assertEqual(out['status'], '2 findings')
+            # stdout only: the prompt echoed on stderr adds no findings
+            self.assertEqual(out['findings'], [
+                {'n': 1, 'severity': 'CRITICAL', 'text': 'Task 1 has no test step -> add one'},
+                {'n': 2, 'severity': 'MAJOR',
+                 'text': 'Task 2 - wrong file path src/a.py does not exist -> use src/b.py'}])
+            logged = json.loads((sdir / 'decisions.jsonl').read_text().splitlines()[-1])
+            self.assertEqual(logged['text'],
+                             'Plan review (codex, external): 2 findings (1 critical, 1 major, 0 minor)')
             self.assertIn('args: exec --sandbox read-only', Path(out['file']).read_text())
             prompt = (fakebin / 'prompt.txt').read_text()
             self.assertIn('Task: add caching', prompt)

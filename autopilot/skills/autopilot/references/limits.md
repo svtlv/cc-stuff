@@ -52,7 +52,7 @@ On the `limit` event, one update:
   ralphex retries every 15 min on its own; finished tasks are kept.
 ```
 
-While limited, post nothing on heartbeats: the `limit` line already gave
+While limited, post nothing on `NO NEWS`: the `limit` line already gave
 the reset time, and `limit-cleared` posts "▶ Limit cleared after 47 min;
 work continues."
 

@@ -339,6 +339,8 @@ POLICY = {
     'plan_pick': (None, None, 'which plan to run when several exist'),
     'plan_check': (900, None, 'redesign a plan the runner cannot run well'),
     'plan_review': (1800, None, 'any changes to the finished plan (plan-only flow)'),
+    'review_pick': (600, None, 'review the finished plan: external, same agent, or none'),
+    'review_apply': (900, None, 'which plan review findings to apply'),
 }
 
 
@@ -1181,22 +1183,53 @@ def review_capability(repo, cfg=None):
             'claude': {'usable': claude_ok, 'reason': claude_why}}
 
 
-PLAN_REVIEW_PROMPT = """Review this implementation plan before it is executed. Do not change any
-files: only read the plan and the repository and report.
+PLAN_REVIEW_PROMPT = """Review an implementation plan before any code is written. Read the plan
+below, then read the project's CLAUDE.md or AGENTS.md (if present) and the source files the plan
+names, so you judge the plan against the code as it is. Do not modify any file.
 
-Check: does it fully cover the task; are the files and steps right for this codebase; does
-every task have a test step; are the validation commands correct; are there risky steps,
-missing migrations, wrong order or tasks too large for one session.
+Report:
+- assumptions about existing code that the code contradicts (wrong names, paths, signatures, behavior)
+- missing steps that would leave the task unsolved, or changes the plan forgets (callers, tests, docs)
+- over-engineering: abstractions, options or layers the task does not need
+- task ordering that breaks the build or tests between tasks, and tasks that cannot be tested as written
+- validation commands that are wrong for this project
+- conflicts with the project conventions in CLAUDE.md or AGENTS.md
 
-Answer with a short list of findings, most important first, each as
-"- [high|medium|low] <finding> -> <suggested change>". When the plan is fine, answer
-"No findings."
+The plan follows the runner's fixed format ("### Task N:" sections with checkboxes, a
+"## Validation Commands" section). Do not report that format or its boilerplate as findings.
+
+Tag each finding with severity:
+- CRITICAL: the plan, as written, fails to solve the task or breaks existing behavior
+- MAJOR: a wrong assumption, missing step or design flaw that will cost rework during implementation
+- MINOR: clarity, naming, optional simplifications
+
+Write each finding on its own line as: `SEVERITY: <plan section or task> - <description> -> <change>`.
+If nothing is found, answer exactly: NO ISSUES FOUND.
 
 Task: {task}
 
 Plan ({path}):
 {plan}
 """
+
+FINDING_RE = re.compile(r'^\s*(?:[-*]\s*)?(?:\*\*)?(?:\[(high|medium|low)\]|(CRITICAL|MAJOR|MINOR)(?:\*\*)?:)',
+                        re.I)
+SEVERITY = {'high': 'CRITICAL', 'medium': 'MAJOR', 'low': 'MINOR'}
+
+
+def plan_findings(stdout):
+    """Numbered findings from the reviewer's stdout, each with its severity and text."""
+    found = []
+    for line in stdout.splitlines():
+        m = FINDING_RE.match(line)
+        if m:
+            sev = (m.group(2) or SEVERITY[m.group(1).lower()]).upper()
+            text = line[m.end():].strip(' *:-')
+            if text and (sev, text) not in [(f['severity'], f['text']) for f in found]:
+                found.append({'n': len(found) + 1, 'severity': sev, 'text': text})
+        elif found and line.startswith(('  ', '\t')) and line.strip():
+            found[-1]['text'] += ' ' + line.strip()  # a wrapped finding goes on
+    return found
 
 
 def cmd_review_plan(args):
@@ -1206,13 +1239,24 @@ def cmd_review_plan(args):
     if not plan.is_file():
         die(f'plan file not found: {plan}')
     cfg = merged(cli_config_paths(repo)).get('', {})
-    if args.executor:
-        cfg['executor'] = args.executor
+    sdir = session_dir(args.session) if args.session else None
+    # the session's actual executor (after a fallback) decides who "the other model" is
+    executor = args.executor or (read_json(sdir / 'session.json', {}) or {}).get('executor') \
+        if sdir else args.executor
+    if executor:
+        cfg['executor'] = executor
     cap = review_capability(repo, cfg)
-    reviewer = args.reviewer or cap['plan_review']['reviewer'] or cap['plan_review']['cross_model']
+    executor = cfg.get('executor') or 'claude'
+    reviewer = {'external': cap['plan_review']['cross_model'], 'same': executor}.get(
+        args.reviewer, args.reviewer) or cap['plan_review']['reviewer'] or cap['plan_review']['cross_model']
+    kind = 'same agent' if reviewer == executor else 'external'
     ok = cap['codex']['usable'] if reviewer == 'codex' else cap['claude']['usable']
     if not ok:
-        emit({'ok': False, 'skipped': True, 'reviewer': reviewer,
+        if sdir:
+            log_decision(sdir, kind='note', by='autopilot',
+                         text=f'Plan review ({reviewer}, {kind}) skipped',
+                         reason=cap[reviewer]['reason'])
+        emit({'ok': False, 'skipped': True, 'reviewer': reviewer, 'review': kind,
               'reason': cap[reviewer]['reason'], 'findings': [], 'no_findings': False})
         return
     prompt = PLAN_REVIEW_PROMPT.format(task=args.task or '(see the plan overview)', path=plan,
@@ -1234,18 +1278,34 @@ def cmd_review_plan(args):
         res = subprocess.run(**command_kwargs(argv), input=prompt, capture_output=True,
                              text=True, encoding='utf-8', errors='replace', cwd=repo, env=env,
                              timeout=args.timeout)
-        code, output = res.returncode, (res.stdout or '') + (res.stderr or '')
+        # findings come from stdout only: codex echoes the whole prompt on stderr, and the
+        # prompt's own severity words would read as findings (each one listed twice)
+        code, output, errors = res.returncode, res.stdout or '', res.stderr or ''
     except subprocess.TimeoutExpired:
-        code, output = None, f'review timed out after {args.timeout} s'
+        code, output, errors = None, '', f'review timed out after {args.timeout} s'
     except OSError as exc:
-        code, output = None, str(exc)
+        code, output, errors = None, '', str(exc)
     out = plan_store(plan) / f'review-{time.strftime("%Y%m%d-%H%M%S")}-{reviewer}.md'
     out.write_text(output, encoding='utf-8')
-    findings = [l.strip() for l in output.splitlines() if re.match(r'\s*-\s*\[(high|medium|low)\]', l, re.I)]
-    emit({'ok': code == 0, 'reviewer': reviewer, 'command': ' '.join(argv[:3]), 'exit_code': code,
-          'seconds': round(now() - started), 'file': str(out), 'findings': findings[:20],
-          'no_findings': 'no findings' in output.lower() and not findings,
-          'tail': output.splitlines()[-15:] if code != 0 else []})
+    if errors:
+        out.with_suffix('.err').write_text(errors, encoding='utf-8')
+    findings = plan_findings(output) if code == 0 else []
+    clean = code == 0 and not findings and ('no issues found' in output.lower()
+                                           or 'no findings' in output.lower())
+    ok = code == 0 and (bool(findings) or clean)
+    status = (f'{len(findings)} findings' if findings else 'no issues found' if clean
+              else 'failed: ' + ((errors or output).strip().splitlines() or [f'exit {code}'])[-1][:200])
+    if sdir:
+        counts = ', '.join(f"{sum(f['severity'] == s for f in findings)} {s.lower()}"
+                           for s in ('CRITICAL', 'MAJOR', 'MINOR'))
+        log_decision(sdir, kind='note', by='autopilot',
+                     text=f'Plan review ({reviewer}, {kind}): {status}'
+                     + (f' ({counts})' if findings else ''), reason=str(out))
+    emit({'ok': ok, 'reviewer': reviewer, 'review': kind, 'status': status,
+          'command': ' '.join(argv[:3]), 'exit_code': code,
+          'seconds': round(now() - started), 'file': str(out), 'findings': findings[:30],
+          'no_findings': clean,
+          'tail': (errors or output).splitlines()[-15:] if not ok else []})
 
 
 def spec_problems(executor, cfg, catalog=None):
@@ -2444,7 +2504,7 @@ class Supervisor:
         meta = read_json(self.sdir / 'session.json', {}) or self.meta
         tab = meta.get('tab') if mode == 'type' else None
         text = (f'autopilot: reattach to run {self.sdir.name} ({why}): run watch-status and '
-                'wait --catch-up, then post the missed updates')
+                'next --catch-up, then post the missed updates')
         how = 'notification'
         if tab:
             code, out = run_quiet(wake_argv(tab, text), timeout=20)
@@ -2912,9 +2972,9 @@ def cmd_hook(args):
         if not mine:
             return
         w = mine[0]
-        todo = (f"start `{ap} wait {w['session']} --catch-up --timeout 1500` in the background "
+        todo = (f"start `{ap} next {w['session']} --catch-up` in the background (Bash timeout 7200000 ms) "
                 'and post its updates') if w['alive'] else \
-            (f"run `{ap} wait {w['session']} --catch-up`, post its updates and the final report, "
+            (f"run `{ap} next {w['session']} --catch-up`, post its updates and the final report, "
              f"then `{ap} mark-reported {w['session']}`")
         print(json.dumps({'decision': 'block',
                           'reason': describe_run(w, chat) + f' Before ending the turn, {todo} '
@@ -2922,7 +2982,7 @@ def cmd_hook(args):
         return
     lines = [describe_run(w, chat) for w in runs]
     lines.append(f'To take charge here, follow "Staying in Charge" in the autopilot-run skill: '
-                 f'`{ap} wait <session> --catch-up` posts what was missed. Answer the user first; '
+                 f'`{ap} next <session> --catch-up` posts what was missed. Answer the user first; '
                  'in a chat that did not start the run, offer this instead of doing it.')
     print(json.dumps({'hookSpecificOutput': {
         'hookEventName': 'SessionStart' if args.event == 'session-start' else 'UserPromptSubmit',
@@ -3057,19 +3117,18 @@ def limit_view(limit):
     return view
 
 
-def cmd_wait(args):
-    """Block until something needs the agent: a new prompt, a notable event, the end, or timeout.
+WAIT_QUIET = {'section', 'started', 'answered', 'auto-answer', 'waiting', 'limit-retry',
+              'transient', 'extended', 'wake'}
 
-    An open prompt wakes the agent only once (when it is newer than --since); after that
-    the wait continues until a reminder, an auto-answer or another event arrives.
+
+def watch(sdir, since, prompt_after, timeout, any_event=False):
+    """Block until something needs the agent; return the report, or None when superseded.
+
+    A prompt wakes the agent only when its id is above prompt_after (None: any open prompt),
+    so one prompt wakes the chat once; after that the watch goes on until a reminder, an
+    auto-answer or another event arrives.
     """
-    sdir = session_dir(args.session)
-    since = args.since
-    if args.catch_up:
-        since = (read_json(sdir / 'seen.json', {}) or {}).get('seq', 0)
-    if since is None:
-        since = (read_json(sdir / 'state.json', {}) or {}).get('seq', 0)
-    end = now() + args.timeout
+    end = now() + timeout
     # one watcher per run: a newer wait replaces an older one, which then exits quietly
     me = {'pid': os.getpid(), 'owner': host_session_id(), 'since': since, 'started': now()}
     write_json(sdir / 'watcher.json', me)
@@ -3080,36 +3139,135 @@ def cmd_wait(args):
         meta['owner'] = me['owner'] or meta.get('owner')
         meta['tab'] = tab or meta.get('tab')
         write_json(sdir / 'session.json', meta)
-    quiet = {'section', 'started', 'answered', 'auto-answer', 'waiting', 'limit-retry',
-             'transient', 'extended', 'wake'}
     while True:
         st = read_json(sdir / 'state.json', {}) or {}
         fresh = [e for e in st.get('events', []) if e['seq'] > since]
         prompt = st.get('waiting') or {}
         new_prompt = st.get('status') == 'waiting' and not answer_pending(sdir, st) and (
-            args.since is None or prompt.get('id', 0) > args.since)
+            prompt_after is None or prompt.get('id', 0) > prompt_after)
         ended = st.get('status') in ('done', 'failed', 'stopped')
         if new_prompt or ended or not pid_alive(st.get('pid')) and st.get('status') != 'starting':
             break
-        if any(e['kind'] not in quiet for e in fresh):
+        if any(e['kind'] not in WAIT_QUIET for e in fresh):
             break
-        if args.any and fresh:
+        if any_event and fresh:
             break
         if now() >= end:
             break
         if (read_json(sdir / 'watcher.json', {}) or {}).get('pid') != os.getpid():
-            emit({'session': sdir.name, 'superseded': True,
-                  'note': 'a newer wait watches this run; nothing to report'})
-            return
+            return None
         time.sleep(1)
     if (read_json(sdir / 'watcher.json', {}) or {}).get('pid') == os.getpid():
         (sdir / 'watcher.json').unlink(missing_ok=True)
     out = report(sdir, st, since)
     if since <= out['seq']:  # it reported everything between since and seq
         write_json(sdir / 'seen.json', {'seq': out['seq'], 't': now()})
-    out['heartbeat'] = not [e for e in out['new_events'] if e['kind'] not in quiet] \
+    out['heartbeat'] = not [e for e in out['new_events'] if e['kind'] not in WAIT_QUIET] \
         and not new_prompt and out['status'] not in ('done', 'failed', 'stopped', 'lost')
+    return out
+
+
+def cmd_wait(args):
+    """Block until something needs the agent: a new prompt, a notable event, the end, or timeout."""
+    sdir = session_dir(args.session)
+    since = args.since
+    if args.catch_up:
+        since = (read_json(sdir / 'seen.json', {}) or {}).get('seq', 0)
+    if since is None:
+        since = (read_json(sdir / 'state.json', {}) or {}).get('seq', 0)
+    out = watch(sdir, since, args.since, args.timeout, args.any)
+    if out is None:
+        emit({'session': sdir.name, 'superseded': True,
+              'note': 'a newer wait watches this run; nothing to report'})
+        return
     emit(out)
+
+
+def clock(seconds_from_now):
+    """'17:15 (in 30 min)' for a deadline seconds_from_now away."""
+    at = time.strftime('%H:%M', time.localtime(now() + seconds_from_now))
+    return f'{at} (in {max(1, round(seconds_from_now / 60))} min)'
+
+
+def next_text(out, sdir):
+    """The `next` report as short plain text: one line per fact, the open prompt last."""
+    sid = out['session']
+    ap = 'AP'
+    head = [f"session {sid} · {out.get('kind')} · {out.get('status')}"]
+    if out.get('section'):
+        head.append(out['section'])
+    tasks = out.get('tasks') or {}
+    if tasks.get('total'):
+        head.append(f"tasks {tasks.get('done')}/{tasks.get('total')}")
+    model = out.get('model') or {}
+    if model.get('model'):
+        head.append(model_label(model))
+    lines = [' · '.join(head)]
+    lines += out.get('updates') or []
+    limit = out.get('limit')
+    if limit:
+        lines.append(f"LIMIT {limit.get('tool') or ''} {limit.get('message') or ''}".strip()
+                     + (f" · resets {clock(limit['resets_in_s'])}" if limit.get('resets_in_s') else ''))
+    status = out.get('status')
+    w = out.get('waiting')
+    if out.get('heartbeat'):
+        open_id = f" · prompt {w.get('id')} still open" if status == 'waiting' and w else ''
+        lines += [f'NO NEWS{open_id} · run {ap} next {sid} again', f"seq {out.get('seq')}"]
+        return '\n'.join(lines)
+    if status == 'waiting' and w:
+        rec = (read_json(sdir / 'recommend.json', {}) or {})
+        rec = rec if rec.get('prompt_id') == w.get('id') else {}
+        left = out.get('auto_answer_in_s')
+        when = (f"auto-answer at {clock(left)}" if left is not None else 'no auto-answer: waits for the user')
+        lines.append(f"PROMPT {w['kind']} (id {w.get('id')}) · {when}")
+        lines.append('recommended: ' + (f"{rec['summary']} ({rec.get('reason') or ''})" if rec
+                                        else f'none registered; run {ap} recommend first'))
+        if w.get('question') and w['kind'] != 'draft':
+            lines.append('question: ' + one_line(w['question']))
+        if w.get('prompt'):
+            lines.append('prompt: ' + one_line(w['prompt']))
+        for i, opt in enumerate(w.get('options') or [], 1):
+            lines.append(f'  {i}. {one_line(opt)}')
+        if w['kind'] == 'draft':
+            lines.append(f"draft: {w.get('draft_file')}")
+            lines.append(f"edit copy: {w.get('edited_file')}")
+            lines.append(f'answer: {ap} answer {sid} --action accept | --action revise --text "..." '
+                         '| --action edited | --action reject')
+        elif w['kind'] in ('question', 'choice'):
+            lines.append(f'answer: {ap} answer {sid} --choice N'
+                         + (' | --text "..."' if w.get('free_text') or w['kind'] == 'question' else ''))
+        elif w['kind'] == 'yesno':
+            lines.append(f'answer: {ap} answer {sid} --yes | --no')
+        else:
+            lines.append(f'answer: {ap} answer {sid} --text "..."')
+    elif status == 'done':
+        lines.append('DONE' + (f" · plan file: {out['plan_file']}" if out.get('plan_file') else ''))
+    elif status in ('failed', 'lost', 'stopped'):
+        lines.append(f'{status.upper()}' + (f": {out['last_error']}" if out.get('last_error') else ''))
+        lines += [f'  error: {e}' for e in out.get('recent_errors') or []]
+        lines.append(f"log: {out.get('log')}")
+    lines.append(f"seq {out.get('seq')}")
+    return '\n'.join(lines)
+
+
+def cmd_next(args):
+    """The one call the chat makes: block until the runner needs it, then print short text.
+
+    It continues after the last event any watch reported (seen.json), so the chat never
+    tracks --since. It returns on a prompt the chat has not seen, a notable event, the end,
+    or after --timeout (default 115 min, under the 2 h limit of background commands).
+    """
+    sdir = session_dir(args.session)
+    since = (read_json(sdir / 'seen.json', {}) or {}).get('seq', 0)
+    # reattaching (a new chat, after a limit): an open prompt that an earlier chat saw counts too
+    out = watch(sdir, since, None if args.catch_up else since, args.timeout)
+    if out is None:
+        print(f'session {sdir.name}: a newer watch took over; nothing to report')
+        return
+    if args.json:
+        emit(out)
+        return
+    print(next_text(out, sdir))
 
 
 def one_line(text):
@@ -3129,6 +3287,8 @@ def open_prompt(sdir):
 def build_answer(w, args):
     """Turn answer flags into (stdin text, one-line summary) for prompt w."""
     kind = w['kind']
+    if getattr(args, 'text_file', None):
+        args.text = Path(args.text_file).read_text(encoding='utf-8')
     text = one_line(args.text) if args.text is not None else None
     if kind == 'question':
         if args.choice:
@@ -3483,6 +3643,13 @@ def main(argv=None):
     s.add_argument('--catch-up', action='store_true',
                    help='start after the last event a wait reported (reattaching)')
     s.set_defaults(fn=cmd_wait)
+    s = sub.add_parser('next')
+    s.add_argument('session')
+    s.add_argument('--timeout', type=int, default=6900)
+    s.add_argument('--json', action='store_true', help='the full wait report instead of text')
+    s.add_argument('--catch-up', action='store_true',
+                   help='reattach: also return an open prompt an earlier watch reported')
+    s.set_defaults(fn=cmd_next)
     s = sub.add_parser('watch-status')
     s.add_argument('session', nargs='?')
     s.set_defaults(fn=cmd_watch_status)
@@ -3499,6 +3666,7 @@ def main(argv=None):
     s.add_argument('session')
     s.add_argument('--choice', type=int)
     s.add_argument('--text')
+    s.add_argument('--text-file', help='read --text from a file (no shell quoting)')
     s.add_argument('--action', choices=['accept', 'revise', 'edited', 'reject'])
     s.add_argument('--yes', action='store_true')
     s.add_argument('--no', action='store_true')
@@ -3509,6 +3677,7 @@ def main(argv=None):
     s.add_argument('session')
     s.add_argument('--choice', type=int)
     s.add_argument('--text')
+    s.add_argument('--text-file', help='read --text from a file (no shell quoting)')
     s.add_argument('--action', choices=['accept', 'revise', 'edited', 'reject'])
     s.add_argument('--yes', action='store_true')
     s.add_argument('--no', action='store_true')
@@ -3533,7 +3702,9 @@ def main(argv=None):
     s = sub.add_parser('review-plan')
     s.add_argument('plan')
     s.add_argument('--task', help='the task the plan should cover')
-    s.add_argument('--reviewer', choices=['codex', 'claude'])
+    s.add_argument('--reviewer', choices=['codex', 'claude', 'external', 'same'],
+                   help='external: the other model; same: the executor model')
+    s.add_argument('--session', help='log the outcome in this session\'s decision log')
     s.add_argument('--executor', choices=['codex', 'claude'],
                    help='actual planning executor, including a per-session fallback')
     s.add_argument('--timeout', type=int, default=900)

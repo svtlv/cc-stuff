@@ -7,30 +7,43 @@ chat shows those lines, never a status on a schedule.
 ## The Loop
 
 ```
-start ─► wait ─► report ─┬─► heartbeat ─► post nothing ──────────────────┐
-                         ├─► updates   ─► post each line as is ──────────┤
-                         ├─► waiting   ─► ask the user ─► answer ────────┤
-                         ├─► failed/lost/stalled ─► recover ─────────────┤
-                         └─► done/stopped ─► final report                │
-                  ▲                                                      │
-                  └──────────────────────────────────────────────────────┘
+start ─► AP next ─┬─► NO NEWS ─► post nothing ─────────────────────────┐
+                  ├─► update lines ─► post each line as is ────────────┤
+                  ├─► PROMPT ─► recommend once, ask the user ──────────┤
+                  ├─► FAILED/LOST/stalled ─► recover ──────────────────┤
+                  └─► DONE/STOPPED ─► final report                     │
+           ▲                                                           │
+           └───────────────────────────────────────────────────────────┘
 ```
-**Note:** each pass is one `wait` call. Pass the previous report's `seq` as
-`--since` so every event is reported exactly once. A heartbeat only means
-the timeout passed with no news, so nothing is posted for it.
+**Note:** each pass is one `AP next` call. It remembers what it already
+reported (`seen.json`), so the chat passes no counter. One prompt wakes the
+chat once. "NO NEWS" comes only when the timeout passes.
 
-| Host capability (`hosts.md`) | How to run `wait` |
+| Host capability (`hosts.md`) | How to run `next` |
 |---|---|
-| Background command with completion notice (Claude Code) | Run `wait --timeout 1500` in the background. Post the update lines, end the turn, and continue when the notice arrives. The user can keep talking in between. |
-| Async process polling (Codex) | Start `wait --timeout 1500`, poll that process until it exits, post the update lines, loop. Keep the turn active. |
-| Neither (other hosts) | Run `wait --timeout 60` in the foreground, post update lines between calls, loop. |
+| Background command with completion notice (Claude Code) | Run `AP next <session>` with `run_in_background` and the Bash `timeout` at 7200000 ms. Post the lines, end the turn, and continue when the notice arrives. The user can talk in between. |
+| Async process polling (Codex) | Start `AP next <session>`, poll that process with long yields until it exits, post the lines, loop. Keep the turn active. |
+| Neither (other hosts) | Run `AP next <session> --timeout 60` in the foreground, post the lines between calls, loop. |
 
-While a prompt is open (`status: waiting`), use a short timeout such as 60 s
-for the next call after answering, so follow-up questions arrive quickly.
+Keep exactly one `next` per run: start the next one after posting, never
+start a second one beside it, never kill it ("One Watcher" in
+`control.md`). A result "a newer watch took over" needs no action.
 
-Keep exactly one `wait` per run: start the next one before posting, ignore
-a result with `superseded: true`, never kill waits ("One Watcher" in
-`control.md`).
+### Token Budget
+
+Every wake of the chat reads the whole context again (100 k tokens and
+more). Wake it only for news:
+
+- Never pass a short `--timeout` to `next` in a host with completion
+  notices. The default (115 min) stays under the 2 h background limit.
+- Read the `next` output file with one plain `cat`. Do not parse it with
+  scripts: it is short text, not JSON.
+- Do not run other background commands (reviews, timers, `sleep`) while a
+  prompt is open. The driver owns the auto-answer timer.
+- Register a recommendation once per prompt. Do not repeat it with the
+  same text.
+- `AP wait` still gives the full JSON report for diagnosis. Use it in
+  the foreground with `--timeout 1` when the text is not enough.
 
 ## Unattended Defaults
 
@@ -55,10 +68,10 @@ are timed by the driver, so they fire even when the chat is idle:
 2. Register it: `AP recommend <session> <answer flags> --reason "<one line why>"`.
 3. Ask in **plain text**, not a blocking question tool, so the monitor keeps
    running: question, numbered options, the recommended one marked, and the
-   clock time of the auto-answer from `auto_answer_in_s` ("Asking" in
+   clock time of the auto-answer from the `PROMPT` line ("Asking" in
    `response-times.md`).
-4. Keep calling `wait --since <seq>`: an open prompt wakes the agent only
-   once, then `wait` blocks until a `reminder`, the reply's effect, or an
+4. Keep `AP next` running: an open prompt wakes the agent only once, then
+   `next` blocks until a `reminder`, the reply's effect, or an
    `auto-answered` event. A reply → `AP answer <session> ...` (add
    `--reason` when the user explained); "more time" → `AP extend`. An
    `auto-answered` event → tell the user what was chosen and why.
@@ -92,7 +105,7 @@ AP log <session> --kind fix --text "a1b2c3d: pin protobuf to 4.x" --reason "code
 
 ## Update Formats
 
-Post the report's `updates` exactly as written, one line each, in order:
+Post the update lines of `next` exactly as written, one line each, in order:
 the same event always reads the same way, so a run's chat is a clean
 timeline. Do not paraphrase `activity`, add "still working" lines or
 re-post the task list. A sample run:
@@ -128,8 +141,8 @@ each, and commits outside tasks (review fixes) get their own line.
 | `failed` | `✗` | One or two lines of diagnosis, then recovery (`recovery.md`) |
 | `waiting` | (no line) | Ask the question per "Unattended Defaults" |
 
-When the user asks "what is it doing now?", answer from `activity` in plain
-words. That is the only time `activity` reaches the chat.
+When the user asks "what is it doing now?", run `AP wait <session> --timeout 1`
+in the foreground and answer from its `activity` in plain words. That is the only time `activity` reaches the chat.
 
 Final report: always, whatever the outcome, per `report.md`.
 
@@ -140,7 +153,7 @@ Final report: always, whatever the outcome, per `report.md`.
 | `limit` event / `limit` field set | Not a failure: the runner or the driver is waiting on purpose. Report it per `limits.md`; never stop or restart a quiet limited run. |
 | `failed` with category `limit` | The reset is far away: decide per "Long Limits" in `limits.md`. |
 | `failed` or `lost` | Show `last_error` and `recent_errors` in one or two lines, then recover on your own per `recovery.md`: apply the known fix or diagnose, log it, start again with the same `--flow`. Stop only when recovery needs the user or the 3 rounds are used. |
-| `stale-answer` event | An answer arrived for an old prompt and was dropped. Call `wait` and answer the current prompt. |
+| `stale-answer` event | An answer arrived for an old prompt and was dropped. Run `next` and answer the current prompt. |
 | `needs-input` event | See "Unattended Defaults". |
 
 Never edit files in the repository while a run is active: the runner commits
@@ -160,4 +173,4 @@ user's attention and can run beside the monitor loop:
   commits (`git log`) and summarize what changed so far.
 
 Keep subagents read-only while the run is active. Without subagent support,
-do the same work inline between `wait` calls.
+do the same work inline between `next` calls.

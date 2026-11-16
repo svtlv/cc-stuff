@@ -1,10 +1,10 @@
 ---
 name: autopilot-plan
-description: This skill should be used when the user runs "/autopilot-plan" or "$autopilot-plan", or asks to "plan this with autopilot", "create an autopilot plan", "make an implementation plan for autonomous execution", "start planning only", "draft a plan for the runner", "plan it but don't implement yet", "turn this design doc into a plan" or "redesign this plan for autopilot". It starts the autonomous plan runner's interactive plan creation, relays every clarifying question and plan draft to the user with a recommended answer that is taken when its response time passes without a reply, and finishes with a plan file in docs/plans/ without starting implementation.
+description: This skill should be used when the user runs "/autopilot-plan" or "$autopilot-plan", or asks to "plan this with autopilot", "create an autopilot plan", "make an implementation plan for autonomous execution", "start planning only", "draft a plan for the runner", "plan it but don't implement yet", "turn this design doc into a plan" or "redesign this plan for autopilot". It starts the autonomous plan runner's interactive plan creation, relays every clarifying question and plan draft to the user in order with a recommended answer that is taken when its response time passes without a reply, offers one external or same-agent review of the finished plan, and finishes with a plan file in docs/plans/ without starting implementation.
 argument-hint: "[task description | --redesign <file>] [-- extra runner flags]"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, Agent
 metadata:
-  version: "0.3.0"
+  version: "0.4.0"
 ---
 
 # Autopilot Plan
@@ -64,7 +64,7 @@ not interrogate.
 ## Step 2 — Active Sessions
 
 When the Step 0 `doctor` report lists a running `plan` in
-`active_sessions`, ask whether to resume watching it (`wait` on that
+`active_sessions`, ask whether to resume watching it (`AP next` on that
 session) or stop it and start fresh.
 
 ## Step 3 — Start
@@ -85,7 +85,8 @@ empty `plan_model` falls back to `task_model`.
 
 Use the returned `executor` after starting: when
 `executor_fallback_reason` is set, say that this session switched to Codex
-and reset phase models to `:`. Use that executor for draft review too.
+and reset phase models to `:`. `review-plan --session` uses that executor
+for the plan review in Step 5.
 
 Tell the user in one line that planning has started, how the model is
 chosen, and that the planner reads the codebase first, which can take a few
@@ -93,71 +94,112 @@ minutes. Keep the returned `session` id.
 
 ## Step 4 — Relay Until Done
 
-Loop on `AP wait <session> --since <seq> --timeout 1500` as described in
-`monitoring.md`, in the way the host supports (`hosts.md`). Post the
-report's `updates` as is (for example "▶ Planning: plan iteration 1 ·
-claude-opus-5-5 (high)") and nothing on heartbeats. Rate limits during
-planning are handled as in a run ("Planning Sessions" in `limits.md`). Act on the report:
+This chat is a proxy between the user and ralphex. Ralphex leads; the chat
+relays its prompts in order and stays free for the user at all times.
 
-Every prompt follows "Unattended Defaults" in `monitoring.md`: pick a
-recommended answer, register it with `AP recommend`, ask in plain text with
-the auto-answer time, keep monitoring. The driver applies the
-recommendation when the response time passes (questions 10 min, the draft
-30 min with a reminder; `response-times.md`).
+```
+AP next ──► PROMPT ──► show it + one recommendation ──► user reply ──► AP answer ──► AP next
+   │                         (driver auto-answers at the deadline)
+   ├──► update lines ──► post them ──► AP next
+   ├──► DONE ──► Step 5
+   └──► FAILED ──► recover ──► AP plan again
+```
+**Note:** one `AP next` is in flight at a time. The chat does nothing else in
+parallel: no extra waits, no reviews and no timers during planning.
+
+Run `AP next <session>` as "The Loop" in `monitoring.md` describes for the
+host (Claude Code: in the background, with the Bash timeout at 7200000 ms).
+It prints short text and tracks the event counter itself. Post its update
+lines as is. Read nothing else from the session to know the state. Rate
+limits during planning are handled as in a run ("Planning Sessions" in
+`limits.md`).
+
+Handle each `PROMPT` in this fixed order, one prompt at a time:
+
+1. Pick one recommended answer (see below) and register it once:
+   `AP recommend <session> ... --reason "..."`. Register again only when the
+   user's words change it.
+2. Show the prompt in plain text with numbered options, the recommended one
+   marked, "or answer in your own words", and the auto-answer clock time
+   from the `PROMPT` line.
+3. Start `AP next <session>` again in the background and end the turn.
+4. On the user's reply, send `AP answer <session> ...`. Put feedback with
+   quotes, `$` or backticks in a file and pass `--text-file <file>`.
 
 **`question`** — Pick the option that best fits the task and the codebase;
-read the relevant code briefly when the choice depends on it. Register it
-(`AP recommend <session> --choice N --reason "..."`), then show the
-planner's question with numbered options, the recommended one marked, plus
-"or answer in your own words". Answer with `AP answer <session> --choice N`
-or `--text "..."`.
+read the relevant code briefly when the choice depends on it. Answer with
+`--choice N` or `--text`.
 
-**`draft`** — Read `waiting.draft_file`. Show a compact digest: the title,
+**`draft`** — Read the `draft:` file once. Show a compact digest: the title,
 one line of overview, the task list as a table (task number, title, step
 count) and the validation commands. Give the file path for the full text.
-When plan review is enabled, have the other model review the draft
-(`AP review-plan <draft_file> --executor <session executor> --task "..."`,
-per "Plan Review" in `reviews.md`) and show its findings with the digest.
-Use the session's executor, including fallback, to choose the other model.
-Honor a request to skip that review; skip an unavailable reviewer with
-its reason. Log either skip and continue planning.
-Check it against the task: recommend `accept`, or `revise` with the
-concrete gaps found as feedback (a missing requirement, a wrong file, no
-tests, the reviewer's high and medium findings). Register the
-recommendation, then ask:
+Recommend `accept`, or `revise` with the concrete gaps found (a missing
+requirement, a wrong file, no tests). The draft gets no review by another
+model: that review comes once, on the finished plan (Step 5).
 
 | Option | Answer |
 |---|---|
 | Accept | `--action accept` |
-| Revise with feedback | ask for feedback, then `--action revise --text "..."` |
-| Edit the draft directly | tell the user to edit `waiting.edited_file` (or make the edits they dictate there), then `--action edited` |
+| Revise with feedback | `--action revise --text-file <file>` |
+| Edit the draft directly | tell the user to edit the `edit copy:` file (or make the edits they dictate there), then `--action edited` |
 | Reject | `--action reject` (ends planning without a plan) |
 
 **`choice`, `yesno`, `text`** — Relay the prompt verbatim with a registered
 recommendation and answer with the matching flag.
 
-**`auto-answered`** — Tell the user in one line what was chosen and why.
-When they reply later with a different wish, apply it at the next prompt
-(usually the draft review, as revise feedback).
+**`⏱` auto-answered line** — Tell the user in one line what was chosen and
+why. When they reply later with a different wish, apply it at the next
+prompt (usually the draft, as revise feedback).
 
-**`error` / `restart`** — Show the error line and say a restart happens
-automatically; earlier answers are kept by the runner.
+**`⚠` error or restart line** — Post the line. A restart happens
+automatically; the runner keeps earlier answers.
 
-**`failed`** — Show `last_error` and `recent_errors`, then recover per
-`recovery.md` and start `AP plan` again with the same description and
-`--flow` (the runner keeps earlier answers). Stop only when recovery needs
-the user or 3 rounds are used.
+**`FAILED`** — Show the error lines, then recover per `recovery.md` and
+start `AP plan` again with the same description and `--flow`. Stop only
+when recovery needs the user or 3 rounds are used.
 
-**`done`** — Continue to Step 5.
+**`DONE`** — Continue to Step 5 with the `plan file:` path.
 
-## Step 5 — Changes to the Finished Plan
+When the user writes while `AP next` runs, answer them at once from what
+the chat already knows. Do not start a second `AP next`.
 
-When this skill was invoked by the `autopilot` skill, skip this step: its
-decide step offers revisions. Otherwise show the plan digest (title, task
-table, validation commands, file path) and ask: "Plan ready. Any changes?"
-with the `plan_review` response time (30 min; no reply means no changes).
-On a change request, run revision rounds per `plan-revision.md` (snapshot,
-direct edit or re-plan, diff, check, ask again) until the user is done.
+## Step 5 — Review the Finished Plan
+
+Review the plan file once, after ralphex wrote it, as `/planning:make` does
+with "Auto review". Follow "Plan Review" in `reviews.md`:
+
+1. Ask in plain text which review to run. Use `ask-timer` with
+   `--decision review_pick` (10 min). Recommend the option from
+   `[review] plan` in the config (`auto` → external), or "No review" when
+   it is `off`.
+
+   | Option | Command |
+   |---|---|
+   | External review (the other model, for example Codex) | `AP review-plan <plan> --reviewer external --session <session> --task "..."` |
+   | Same-agent review (the executor model, read-only) | `AP review-plan <plan> --reviewer same --session <session> --task "..."` |
+   | Edit the plan yourself | the user edits the file; then `AP check-plan <plan>` |
+   | No review | go on |
+
+2. Say "Codex reviews the plan (about 3 min)" and run the review (Claude
+   Code: in the background). Start nothing else until it returns.
+3. Show the result: the status line, then each finding as a table row
+   (number, severity, text, your assessment). The reviewer did not see this
+   chat, so a finding can be settled already, or be noise: say so.
+4. Ask which findings to apply ("1,3", "all", "none"). Recommend the ones
+   your assessment accepts. Use `ask-timer --decision review_apply`
+   (15 min).
+5. Apply the chosen findings: `AP plan-rev snapshot <plan>`, edit the plan,
+   `AP plan-rev diff <plan>`, `AP check-plan <plan>`. Log the outcome with
+   `AP log <session> --kind decision --text "Applied findings 1,3"`.
+6. Offer the remaining options again without the review just done, as
+   `/planning:make` does. When a review was skipped or failed, keep it in
+   the list.
+
+When this skill was invoked by the `autopilot` skill, return to it after
+this step: its decide step offers further revisions. Otherwise ask "Plan
+ready. Any changes?" with the `plan_review` response time (30 min; no reply
+means no changes). On a change request, run revision rounds per
+`plan-revision.md` until the user is done.
 
 ## Step 6 — Hand Over
 

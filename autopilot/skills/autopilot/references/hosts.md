@@ -28,9 +28,9 @@ a nested `claude` or `codex` never believes it runs inside the host.
 
 | Capability | Use | Fallback |
 |---|---|---|
-| Background command with completion notice (Claude Code: `run_in_background`) | Run `wait`/`timer` in the background, end the turn, continue on the notice; the user can talk meanwhile | — |
-| Async process polling (Codex: `exec_command` yielding a session, polled with `write_stdin`) | Start `wait`, poll the same process until it exits; keep the turn active | — |
-| Neither | Run `wait --timeout 60` and `ask-timer wait --max 60` in the foreground in a loop, posting updates between calls | Runner prompts still auto-answer on the driver's timer |
+| Background command with completion notice (Claude Code: `run_in_background`) | Run `next` (Bash timeout 7200000 ms) or `ask-timer wait` in the background, end the turn, continue on the notice; the user can talk meanwhile | — |
+| Async process polling (Codex: `exec_command` yielding a session, polled with `write_stdin`) | Start `next`, poll the same process until it exits; keep the turn active | — |
+| Neither | Run `next --timeout 60` and `ask-timer wait --max 60` in the foreground in a loop, posting updates between calls | Runner prompts still auto-answer on the driver's timer |
 | Question tool (AskUserQuestion and similar) | Only for setup, which never runs unattended | Numbered options in plain text |
 | Terminal that can be typed into (Orca tab, tmux, WezTerm, kitty, iTerm2, or `[wake] command`) | The supervisor wakes the owner chat after its usage limit by typing one line: any provider (`control.md`) | Desktop notification |
 | Scheduled prompts (Claude Code: `CronCreate`) | Optional watchdog when the tab cannot be typed into | Typed wake line, notification |
@@ -43,8 +43,8 @@ and recovery. Ask runtime questions in plain text (`monitoring.md`).
 
 A turn that ends while a session runs is fine only when something will wake
 the agent again (a completion notice). Without one, keep the turn active
-with foreground `wait` calls until the session ends; the run itself
-continues either way, and `list`/`wait` reattach later.
+with foreground `next` calls until the session ends; the run itself
+continues either way, and `list`/`next` reattach later.
 
 ## Naming the Commands
 

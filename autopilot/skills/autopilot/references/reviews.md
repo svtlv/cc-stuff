@@ -6,7 +6,7 @@ the main one produced, so it catches what that model missed.
 | Review | Owner | Reviews | Default |
 |---|---|---|---|
 | **External code review** | The runner (ralphex), after the tasks | The branch's code changes | `external_review_tool = codex` in the Claude setup; skipped in the Codex setup |
-| **Plan review** | autopilot (`AP review-plan`), at the draft | The plan, read-only | Off until setup turns it on (`.autopilot/config`, `[review] plan`) |
+| **Plan review** | autopilot (`AP review-plan`), once, on the finished plan file | The plan, read-only | Offered after planning; `[review] plan` sets the recommended reviewer (`off` recommends no review) |
 
 ## Can Either CLI Review Here?
 
@@ -72,37 +72,57 @@ a run without the external review has had one check fewer.
 
 ## Plan Review
 
-When plan review is enabled and the reviewer is usable, review each draft
-before recommending an answer. Use the session's actual `executor` from
-`AP wait` or the start result, including any fallback, to choose the other
-model. Pass `--executor <executor>` to `review-plan` so `auto` uses that
-executor rather than the repository's configured one:
+Ralphex plan mode has no plan review of its own (backlog item
+`plan-mode-has-no-external-plan-review` in ralphex.windows). Autopilot adds
+it as one step after ralphex writes the plan file, as `/planning:make`
+does with "Auto review". Drafts get no review by another model.
 
-1. `AP review-plan <draft_file> --executor <executor> --task "<task description>"`. It runs the
-   reviewer read-only (Codex: `<codex_command> exec --sandbox read-only`;
-   Claude: `--permission-mode plan`), routed by agrouter when the repository
-   routes. It takes minutes, so run it in the background where the host
-   allows, inside the draft's 30-minute window.
-2. Read `findings` (`[high|medium|low] finding -> change`) or `no_findings`.
-3. Recommend **revise** with the high and medium findings as feedback, or
-   **accept** when nothing important came up. Show the findings to the user
-   with the draft digest, labelled with the reviewer.
-4. Log it: `AP log <session> --kind decision --text "Plan review (codex): 2
-   findings, recommended revise"`.
+```
+ralphex: questions ─► drafts ─► accept ─► plan file
+                                              │
+autopilot: which review? ─► review-plan ─► findings + assessment ─► which to apply? ─► edit, check
+              (review_pick)                                          (review_apply)
+```
+**Note:** every step waits for the one before it. The chat runs no review
+beside a ralphex prompt, so the user always sees one open question.
 
-A failed or timed-out review (`ok: false`) never blocks planning. An
+| Reviewer | `--reviewer` | Who reviews |
+|---|---|---|
+| External | `external` | The other model: Codex in the Claude setup, Claude in the Codex setup |
+| Same agent | `same` | The executor model, read-only |
+| By name | `codex`, `claude` | That CLI |
+
+1. `AP review-plan <plan> --reviewer external|same --session <session>
+   --task "<task description>"`. It runs the reviewer read-only (Codex:
+   `<codex_command> exec --sandbox read-only`; Claude: `--permission-mode
+   plan`), routed by agrouter when the repository routes. `--session`
+   takes the session's actual executor (after a fallback) and logs the
+   outcome in its decision log. It takes minutes: run it in the background
+   where the host allows, and start nothing else until it returns.
+2. Read `status` and `findings`: each has `n`, `severity` (`CRITICAL`,
+   `MAJOR`, `MINOR`) and `text`. Only the reviewer's stdout counts; its
+   stderr goes to a `.err` file beside the review file.
+3. Show every finding with your own assessment. The reviewer did not see
+   this chat: a finding can be settled already by the user's answers, or
+   be noise. Recommend applying the CRITICAL and MAJOR findings that your
+   assessment accepts.
+4. Ask which to apply, with the `review_apply` time. Apply them as a
+   direct edit per `plan-revision.md`, then `check-plan`. Log the outcome:
+   `AP log <session> --kind decision --text "Applied plan review findings
+   1,3" --reason "..."`.
+
+A failed or timed-out review (`ok: false`) never blocks the plan. An
 unavailable reviewer returns `skipped: true` with its `reason` and no model
-call. Say why in one line, log the skip, and recommend from the agent's
-own reading. An unverified Claude auth status is reported as unverified;
-offer `claude auth status` to check it, or keep the optional review skipped.
+call. Say why in one line and offer the other reviewer or no review. An
+unverified Claude auth status is reported as unverified; offer `claude auth
+status` to check it.
 
-Honor "skip the Claude review", "skip the Codex review", or "skip the
-plan review" for the current draft. Do not invoke `review-plan`; log the
-user's choice and continue. For a permanent plan-review skip, set
-`[review] plan = off` through setup. Keep external code-review skips
-separate: `skip-review` controls the runner's external review only.
+Honor "skip the plan review", "skip the Codex review" and "skip the Claude
+review": go on without it and log the user's choice. For no review offer at
+all, set `[review] plan = off` through setup. Keep external code-review
+skips separate: `skip-review` controls the runner's external review only.
 
 The user can also ask any time: "review the plan with codex" →
-`AP review-plan <plan> --reviewer codex`, for a draft, a finished plan
-or a plan passed to `autopilot-run`. Use `--reviewer claude` for the same
-request naming Claude.
+`AP review-plan <plan> --reviewer codex`, for a finished plan or a plan
+passed to `autopilot-run`. Use `--reviewer claude` for the same request
+naming Claude.

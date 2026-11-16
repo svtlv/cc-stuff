@@ -22,6 +22,8 @@ and how costly a wrong default is.
 | `preflight` | Worktree for a dirty tree, model-spec override, doc drift, active session, incomplete config | 10 min | — | recommended |
 | `plan_pick` | Which plan to run when several exist | never | — | waits |
 | `plan_review` | "Any changes?" after plan-only planning | 30 min | — | no changes |
+| `review_pick` | Review the finished plan: external, same agent, edit, or none | 10 min | — | the reviewer from `[review] plan` (`off`: no review) |
+| `review_apply` | Which plan review findings to apply | 15 min | — | the findings the agent's assessment accepts |
 | `plan_check` | Redesign a plan the runner cannot use (or run one with warnings) | 15 min | — | redesign (or run as is, for minor warnings) |
 | `text` | Free-text prompt without a safe default | never | — | waits |
 
@@ -49,7 +51,7 @@ started with.
 | Asked by | Timer | Commands |
 |---|---|---|
 | The runner (planner questions, draft, runtime prompts) | The driver's supervisor: fires even when the chat is idle | `recommend` (what to send), `extend`, `answer` |
-| The agent (`decide`, `run_start`, `limit`, `recovery`, `preflight`, `plan_pick`) | `ask-timer` | `start`, `wait`, `cancel`, `extend` |
+| The agent (`decide`, `run_start`, `limit`, `recovery`, `preflight`, `plan_pick`, `review_pick`, `review_apply`) | `ask-timer` | `start`, `wait`, `cancel`, `extend` |
 
 Agent timer flow:
 

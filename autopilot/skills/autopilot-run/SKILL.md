@@ -4,7 +4,7 @@ description: This skill should be used when the user runs "/autopilot-run" or "$
 argument-hint: "<plan file> [-- extra runner flags such as --worktree or --tasks-only]"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, Agent, CronCreate, CronDelete
 metadata:
-  version: "0.3.0"
+  version: "0.4.0"
 ---
 
 # Autopilot Run
@@ -114,17 +114,17 @@ every task start and finish, review, commit and problem.
 
 ## Step 4 — Monitor Until It Ends
 
-Follow `monitoring.md`: loop on `AP wait <session> --since <seq> --timeout
-1500`, in the way the host supports (`hosts.md`). Post every line of the
-report's `updates` as is ("Update Formats" in `monitoring.md`); the table
-says what to add or do on top.
+Follow `monitoring.md`: loop on `AP next <session>`, in the way the host
+supports (`hosts.md`; Claude Code: background, Bash timeout 7200000 ms).
+Post its update lines as is ("Update Formats" in `monitoring.md`); the
+table says what to add or do on top.
 
 | Report | Response |
 |---|---|
-| heartbeat | Post nothing; call `wait` again. |
+| `NO NEWS` | Post nothing; run `next` again. |
 | `task-start`, `task-done`, `phase-start`, `commit`, `error`, `restart` | The line only. |
 | `stalled` | The line, plus one sentence from the log's last lines on what it is stuck on. |
-| `waiting` | The runner needs input. Register a recommendation, relay the prompt verbatim with its auto-answer time (`runtime`, 10 min: the run is blocked meanwhile), answer with the user's reply ("Unattended Defaults"). |
+| `PROMPT` | The runner needs input. Register a recommendation, relay the prompt verbatim with its auto-answer time (`runtime`, 10 min: the run is blocked meanwhile), answer with the user's reply ("Unattended Defaults"). |
 | `auto-answered` | The line (what was chosen without a reply, and why). |
 | `limit` / `limit-cleared` | The line, with the reset as a clock time. See `limits.md`. |
 | `failed`, category `limit` | Reset is hours away: pick and recommend an option per "Long Limits" in `limits.md`; `ask-timer` with `--decision limit` (30 min). |
@@ -141,11 +141,11 @@ time ("Mid-Run Requests" in `control.md`). Questions are answered from the
 report, the log and the run branch's commits while the run continues.
 Changes to code, the plan or models go through a safe point: `AP stop
 <session> --after-task`, change, `AP resume <session>`. Keep exactly one
-`wait` in flight ("One Watcher"). If the chat goes quiet (its own usage
+`next` in flight ("One Watcher"). If the chat goes quiet (its own usage
 limit), the supervisor wakes it by typing a line into its terminal tab, for
 any provider ("Waking the Chat"); on Claude Code in a terminal that cannot
 be typed into, arm the watchdog cron when the run starts. On a wake line, in
-a new chat, or after any interruption, reattach with `AP wait <session>
+a new chat, or after any interruption, reattach with `AP next <session>
 --catch-up` ("Reattach").
 
 ## Step 5 — Final Report

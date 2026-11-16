@@ -8,11 +8,11 @@ it keeps watching through usage limits, restarts and new chats.
 ```
 user ──► owner chat ──► AP commands ──► supervisor ──► ralphex
               ▲                            │
-              ├── one background wait ◄────┤
+              ├── one background next ◄────┤
               └── wake line, if unwatched ◄┘   (+ hooks, + Claude cron)
 ```
 **Note:** the supervisor runs the build without the chat. The chat keeps
-exactly one `wait` in flight to hear about it, and answers the user in
+exactly one `AP next` in flight to hear about it, and answers the user in
 between.
 
 ## Mid-Run Requests
@@ -44,13 +44,14 @@ itself). Each stop and resume shows up as a fixed line (`⏸ Will stop after
 
 ## One Watcher
 
-- Keep exactly one `wait` running per live run. Start the next one before
+- Keep exactly one `next` running per live run. Start the new one before
   posting the updates of the last one, so a limit mid-turn still leaves a
   watcher behind.
-- A new `wait` takes over from an older one; the older exits with
-  `superseded: true`. Ignore such a result: do not post it, do not start
-  another wait for it. Never `pkill` waits.
-- Answering the user does not touch the watcher: the background `wait`
+- A new `next` (or `wait`) takes over from an older one; the older exits
+  with "a newer watch took over" (`superseded: true` from `wait`). Ignore
+  such a result: do not post it, do not start another one for it. Never
+  `pkill` watchers.
+- Answering the user does not touch the watcher: the background `next`
   keeps running.
 
 ## Waking the Chat
@@ -94,7 +95,7 @@ command = mytool send --text {text}   # any terminal not listed above
 
 The tab is recorded from the terminal's own variables (`ORCA_TERMINAL_HANDLE`,
 `TMUX_PANE`, `WEZTERM_PANE`, `KITTY_WINDOW_ID`, `ITERM_SESSION_ID`) by `run`
-and by every `wait`, so it always points at the chat that watched last.
+and by every `next` or `wait`, so it always points at the chat that watched last.
 
 ### Watchdog Cron (Claude Code, Optional)
 
@@ -135,8 +136,9 @@ watch-status`.
 After a limit, a restart of the chat, or a new chat taking charge:
 
 1. `AP watch-status` (all runs of the repository) or `AP watch-status <session>`.
-2. Start `AP wait <session> --catch-up --timeout 1500` in the background: it
-   returns at once with every missed update when there are any.
+2. Start `AP next <session> --catch-up` in the background: it continues
+   after the last reported event and also returns an open prompt that an
+   earlier chat saw, so it returns at once with everything missed.
 3. Post the missed lines as one block, headed `While I was away (<from>–<to>):`.
    Then continue the normal loop. Answer any open runner prompt; act on an
    expired agent timer per `response-times.md`.

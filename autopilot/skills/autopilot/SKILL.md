@@ -4,7 +4,7 @@ description: This skill should be used when the user runs "/autopilot" or "$auto
 argument-hint: "[task description | path to an existing plan file] [-- extra runner flags]"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, Skill, Agent, CronCreate, CronDelete
 metadata:
-  version: "0.3.0"
+  version: "0.4.0"
 ---
 
 # Autopilot
@@ -91,9 +91,10 @@ Text after `--` is passed through: planning flags (such as
 
 ## Step 2 — Plan
 
-Follow `autopilot-plan` Steps 3–4 with the description. Relay every question
-and draft to the user with a registered recommendation and its response
-time.
+Follow `autopilot-plan` Steps 3–5 with the description. Relay every question
+and draft to the user in order, with a registered recommendation and its
+response time, then offer the one review of the finished plan (external or
+same agent, Step 5 there).
 Planning ends with a `plan_file`, or with a rejected draft: then skip to
 Step 6 and report why it ended.
 
@@ -139,7 +140,7 @@ start the run; do not ask again in the run's preflight.
 Follow `autopilot-run` Steps 2–4 with the plan and `--flow <id>`. Stay
 with the run until it ends: one fixed line per milestone (each task's start
 with its model and its finish with the commit, reviews, restarts, limits),
-nothing on heartbeats, failures recovered per `recovery.md`. The user can
+nothing on `NO NEWS`, failures recovered per `recovery.md`. The user can
 ask about the run or have it changed at any time; this chat stays in charge
 per `references/control.md` (safe stop, resume, watchdog, reattach).
 
@@ -159,7 +160,9 @@ Delegate to subagents when the host supports them and the work is
 independent of the user's next answer:
 
 - During planning, a read-only subagent can map the code areas the
-  description touches, so draft reviews come with context.
+  description touches, so recommendations come with context. It never runs
+  beside an open ralphex prompt in a way that changes the order of
+  questions.
 - During the run, a read-only subagent can diagnose a failure while the
   monitor keeps going (see `references/recovery.md`).
 - For the final report, a read-only subagent can write the summary of
