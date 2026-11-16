@@ -4,7 +4,7 @@ description: This skill should be used when the user asks to "address review com
 argument-hint: "<review-comments> | --comments-file <path>"
 allowed-tools: Bash, Read, Edit, Write, Grep, Glob, Skill
 metadata:
-  version: "0.7.1"
+  version: "0.8.0"
 ---
 
 # Address Review Comments
@@ -82,3 +82,23 @@ Run validation appropriate to the changes and repository requirements. Preserve 
 Report each supplied comment as fixed, already satisfied/no longer applicable, or requiring discussion/unaddressed. Include its ID or position, location when known, and a concise description of the result. Link general comments to any specific fixes that satisfied them. List changed files, validation performed, and failures or remaining decisions.
 
 Keep source-side resolution and acknowledgements manual. Do not post replies, mark threads resolved, delete or mark Orca notes as sent, commit, or push as part of this workflow.
+
+## Output Language
+
+Write all text for the user in ASD-STE100 Simplified Technical English:
+chat messages, questions, summaries, reports and the Note under each
+diagram. Do not apply it to code, identifiers, file paths, commands, quotes
+or error messages. Keep them exactly as they are.
+
+- Use one word for one meaning. Use simple, common words and keep the
+  same technical name for the same thing.
+- Write sentences of 20 words or fewer for instructions and 25 words or
+  fewer for descriptions. Write one instruction in each sentence.
+- Use the active voice and simple tenses: present, simple past and simple
+  future. Use the imperative for instructions.
+- Keep paragraphs to six sentences or fewer. Use lists and tables for
+  complex information.
+- Use "the" and "a". Do not remove words to make text shorter. Do not use
+  more than three nouns together.
+- When the user writes in a different language, use that language with
+  the same short, simple rules.

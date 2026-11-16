@@ -4,7 +4,7 @@ description: This skill should be used when the user asks to "create a partner",
 argument-hint: "[provider] [model] [effort]  ·  add [provider ...] | resume [id] | sessions | list | baton <id> | idle | stop"
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob, AskUserQuestion, WebSearch, WebFetch, Skill
 metadata:
-  version: "1.1.0"
+  version: "1.4.0"
 ---
 
 # Partner
@@ -323,3 +323,23 @@ A `UserPromptSubmit` hook opens this session's turn (so nobody pauses while it w
 ## When things go wrong
 
 Symptoms and fixes are in `references/troubleshooting.md` — read it when a partner will not start, will not reply, edits out of turn, or the user's partners are not the ones they expected.
+
+## Output Language
+
+Write all text for the user in ASD-STE100 Simplified Technical English:
+chat messages, questions, summaries, reports and the Note under each
+diagram. Do not apply it to code, identifiers, file paths, commands, quotes
+or error messages. Keep them exactly as they are.
+
+- Use one word for one meaning. Use simple, common words and keep the
+  same technical name for the same thing.
+- Write sentences of 20 words or fewer for instructions and 25 words or
+  fewer for descriptions. Write one instruction in each sentence.
+- Use the active voice and simple tenses: present, simple past and simple
+  future. Use the imperative for instructions.
+- Keep paragraphs to six sentences or fewer. Use lists and tables for
+  complex information.
+- Use "the" and "a". Do not remove words to make text shorter. Do not use
+  more than three nouns together.
+- When the user writes in a different language, use that language with
+  the same short, simple rules.

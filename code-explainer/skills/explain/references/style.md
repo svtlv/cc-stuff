@@ -21,7 +21,8 @@ Do not add a preamble ("Let me explain…"), a closing recap, or a list of offer
 - Explain every term the first time it appears. That includes the project's own jargon, such as "soft deadline" or "map step".
 - Use active voice with a clear actor: "C# validates the answer", not "the answer is validated".
 - Do not use filler such as "basically", "essentially", "it's worth noting" or "comprehensive", and do not use emoji.
-- Say "I don't know" or "not verified" rather than guessing.
+- Say "I do not know" or "not verified" rather than guessing.
+- Follow ASD-STE100 Simplified Technical English for all text ("Output Language" in `../SKILL.md`).
 
 ## Diagrams
 

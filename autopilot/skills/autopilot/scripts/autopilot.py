@@ -3364,6 +3364,12 @@ def cmd_report(args):
                  'waited_min': d.get('waited_min'), 'recommended': d.get('recommended'),
                  'reason': d.get('reason')}
                 for d in decisions if d.get('by') == 'auto']
+    # every choice the user did not make: timeouts, agent and autopilot choices, recoveries
+    without_user = [{'t': d.get('t'), 'session': d['session'], 'kind': d.get('prompt') or d.get('kind'),
+                     'by': d.get('by'), 'question': d.get('question'),
+                     'chosen': d.get('answer') or d.get('text'), 'reason': d.get('reason'),
+                     'waited_min': d.get('waited_min'), 'recommended': d.get('recommended')}
+                    for d in decisions if d.get('by', 'user') != 'user' and d.get('kind') != 'note']
     git = {}
     if repo:
         base = default_branch(repo)
@@ -3376,7 +3382,7 @@ def cmd_report(args):
             git['commits'] = commits.splitlines()[:60]
             git['diffstat'] = stat.splitlines()[-25:]
     emit({'flow': flow, 'sessions': sessions, 'decisions': decisions, 'timeouts': timeouts,
-          'git': git})
+          'without_user': without_user, 'git': git})
 
 
 def cmd_stop(args):

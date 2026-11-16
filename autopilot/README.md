@@ -65,7 +65,7 @@ chat line; nothing is posted on a timer.
 | You don't answer | Each question has a recommended answer, chosen with a reason, and a response time that fits it: 10 min for planner questions, 30 min for the plan draft, 60 min to decide whether to implement (reminders before the long ones; say "wait" for more). Then the recommendation is taken and the work continues to the end. Times are configurable in `~/.config/autopilot/config`. Installing software and credentials always wait for you. |
 | You ask about or change the run mid-way | The chat that started it stays in charge: it answers from the log and the branch's commits while the run continues. Code, plan or model changes go through a safe point: "pause after this task", change, "resume". |
 | The chat hits its own usage limit, or you open a new chat | The run continues by itself. When no chat has watched for 10 minutes and there is news, the supervisor types a wake line into the chat's terminal tab (Orca tab, tmux, WezTerm, kitty, iTerm2, or your own `[wake] command`), which works for Claude Code, Codex or any other agent CLI; otherwise it shows a desktop notification. The chat then posts the updates you missed. |
-| Flow ends (any outcome) | A full report: summary, decisions with who made them and why, a walkthrough of what was built, problems and recoveries, next steps. Saved next to the session state. |
+| Flow ends (any outcome) | A short report in two main parts: first every decision made without you (with why and how to change it), then the goal and what was done. Open items follow only when you must act. Saved next to the session state. |
 
 In hosts that notify on background commands (Claude Code) the monitor runs
 in the background, so you can keep chatting during a run; elsewhere it runs
@@ -135,7 +135,7 @@ scripts are never overwritten without asking.
 | `ralphex.windows` or `ralphex` | planning and execution |
 | `agrouter` + classifier key | model routing (optional: runs work with fixed models too) |
 | `claude` and/or `codex` CLI, logged in | the models doing the work |
-| [code-explainer](../code-explainer/) (optional) | the plan report in the full run; a compact built-in report is used without it |
+| [code-explainer](../code-explainer/) (optional) | the plan report in the full run and the "what was done" bullets in the final report; a compact built-in summary is used without it |
 
 ## Install
 

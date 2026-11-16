@@ -1,10 +1,10 @@
 ---
 name: autopilot-run
-description: This skill should be used when the user runs "/autopilot-run" or "$autopilot-run", or asks to "run this plan with autopilot", "execute the plan", "implement docs/plans/x.md autonomously", "start the autopilot run", "resume the autopilot run", "watch the run", "pause after this task", or sends an "autopilot: reattach to run" wake line. It first checks that the plan file suits the runner (task sections, checkboxes, tests) and offers to redesign an unsuitable one with autopilot-plan, then executes it with the autonomous plan runner, monitors every phase, restarts failed attempts automatically, diagnoses and fixes blocking problems itself, shows errors as they happen, keeps the user posted on what the run is doing right now and ends with a full report.
+description: This skill should be used when the user runs "/autopilot-run" or "$autopilot-run", or asks to "run this plan with autopilot", "execute the plan", "implement docs/plans/x.md autonomously", "start the autopilot run", "resume the autopilot run", "watch the run", "pause after this task", or sends an "autopilot: reattach to run" wake line. It first checks that the plan file suits the runner (task sections, checkboxes, tests) and offers to redesign an unsuitable one with autopilot-plan, then executes it with the autonomous plan runner, monitors every phase, restarts failed attempts automatically, diagnoses and fixes blocking problems itself, shows errors as they happen, keeps the user posted on what the run is doing right now and ends with a short report: decisions made without the user, then the goal and what was done.
 argument-hint: "<plan file> [-- extra runner flags such as --worktree or --tasks-only]"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, Agent, CronCreate, CronDelete
 metadata:
-  version: "0.2.0"
+  version: "0.3.0"
 ---
 
 # Autopilot Run
@@ -152,11 +152,10 @@ a new chat, or after any interruption, reattach with `AP wait <session>
 
 Always, whatever the outcome. When invoked by the `autopilot` skill,
 return control to it (it writes the report for the whole flow). Otherwise
-follow `report.md` with `AP report --flow <id>`: summary, plan tasks and
-their status, critical decisions (user, default after the response time, autopilot,
-agent), a full explanation of what was built (explain-summarize on the
-branch changes when available), problems and recoveries, state now, next
-steps. Note where the plan went when the runner moved it to `completed/`.
+follow `report.md` with `AP report --flow <id>`: first every decision
+made without the user (`without_user`), then the goal and what was done
+(summarize on the branch changes when available, plan tasks and their
+status), then only the open items that need the user. Note where the plan went when the runner moved it to `completed/`.
 Then `AP mark-reported <session>` (the supervisor stops waking) and delete
 the watchdog cron job if one was made.
 
@@ -170,3 +169,23 @@ the watchdog cron job if one was made.
   guardrails of `recovery.md`.
 - Do not hide failures. Every `error`, `restart` and `failed` event reaches
   the user, quoted.
+
+## Output Language
+
+Write all text for the user in ASD-STE100 Simplified Technical English:
+chat messages, questions, summaries, reports and the Note under each
+diagram. Do not apply it to code, identifiers, file paths, commands, quotes
+or error messages. Keep them exactly as they are.
+
+- Use one word for one meaning. Use simple, common words and keep the
+  same technical name for the same thing.
+- Write sentences of 20 words or fewer for instructions and 25 words or
+  fewer for descriptions. Write one instruction in each sentence.
+- Use the active voice and simple tenses: present, simple past and simple
+  future. Use the imperative for instructions.
+- Keep paragraphs to six sentences or fewer. Use lists and tables for
+  complex information.
+- Use "the" and "a". Do not remove words to make text shorter. Do not use
+  more than three nouns together.
+- When the user writes in a different language, use that language with
+  the same short, simple rules.

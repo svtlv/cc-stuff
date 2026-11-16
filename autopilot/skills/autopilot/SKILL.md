@@ -1,10 +1,10 @@
 ---
 name: autopilot
-description: This skill should be used when the user runs "/autopilot" or "$autopilot", or asks to "autopilot this", "plan and implement this autonomously", "do the full autopilot run", "take this from idea to code", "plan it, explain it, then build it", "run the whole plan-and-execute flow" or "build this while I'm away". It orchestrates the full flow on the autonomous plan runner and model router - interactive planning with the user, a summary and explanation of the plan, the decision to implement or stop, then a supervised implementation run with automatic restarts, self-recovery and live status. It keeps going when the user is away (recommended answers after a response time: 10 minutes for questions, an hour to decide on implementation) and always ends with a full report of what was built and every critical decision.
+description: This skill should be used when the user runs "/autopilot" or "$autopilot", or asks to "autopilot this", "plan and implement this autonomously", "do the full autopilot run", "take this from idea to code", "plan it, explain it, then build it", "run the whole plan-and-execute flow" or "build this while I'm away". It orchestrates the full flow on the autonomous plan runner and model router - interactive planning with the user, a summary and explanation of the plan, the decision to implement or stop, then a supervised implementation run with automatic restarts, self-recovery and live status. It keeps going when the user is away (recommended answers after a response time: 10 minutes for questions, an hour to decide on implementation) and always ends with a short report: first every decision made without the user, then the goal and what was done.
 argument-hint: "[task description | path to an existing plan file] [-- extra runner flags]"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, Skill, Agent, CronCreate, CronDelete
 metadata:
-  version: "0.2.0"
+  version: "0.3.0"
 ---
 
 # Autopilot
@@ -148,10 +148,10 @@ per `references/control.md` (safe stop, resume, watchdog, reattach).
 After the report, `AP mark-reported <run-session>` and delete the watchdog
 cron job. Always, whatever happened: done, failed after recovery, stopped, or ended
 at the plan stage. Follow `references/report.md` with `AP report --flow
-<id>`: a summary, what was asked, the critical decisions (who made each and
-why, auto-defaults marked), a full explanation of what was built
-(explain-summarize on the branch changes), problems and how they were
-recovered, the state now and next steps.
+<id>`. The report has two main parts: first every decision made without
+the user (`without_user`: timeouts, agent and autopilot choices,
+recoveries), then the goal and what was done (summarize on the branch
+changes, the task table). Add only the open items that need the user.
 
 ## Parallel Work
 
@@ -162,7 +162,7 @@ independent of the user's next answer:
   description touches, so draft reviews come with context.
 - During the run, a read-only subagent can diagnose a failure while the
   monitor keeps going (see `references/recovery.md`).
-- For the final report, a read-only subagent can write the walkthrough of
+- For the final report, a read-only subagent can write the summary of
   a large branch diff while the decision tables are assembled.
 
 Keep subagents read-only while the runner works in the repository. Without
@@ -174,3 +174,23 @@ subagent support, do the same work inline.
 - Ask before starting implementation; without a reply within the `decide`
   time (60 min by default), implementing is the default.
 - Keep updates short: a line or two per event, tables for summaries.
+
+## Output Language
+
+Write all text for the user in ASD-STE100 Simplified Technical English:
+chat messages, questions, summaries, reports and the Note under each
+diagram. Do not apply it to code, identifiers, file paths, commands, quotes
+or error messages. Keep them exactly as they are.
+
+- Use one word for one meaning. Use simple, common words and keep the
+  same technical name for the same thing.
+- Write sentences of 20 words or fewer for instructions and 25 words or
+  fewer for descriptions. Write one instruction in each sentence.
+- Use the active voice and simple tenses: present, simple past and simple
+  future. Use the imperative for instructions.
+- Keep paragraphs to six sentences or fewer. Use lists and tables for
+  complex information.
+- Use "the" and "a". Do not remove words to make text shorter. Do not use
+  more than three nouns together.
+- When the user writes in a different language, use that language with
+  the same short, simple rules.

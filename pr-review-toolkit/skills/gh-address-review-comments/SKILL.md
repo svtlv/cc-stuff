@@ -4,7 +4,7 @@ description: This skill should be used when the user asks to "fetch GitHub revie
 argument-hint: "[pr-number]"
 allowed-tools: Bash, Read, Edit, Write, Grep, Glob, Skill
 metadata:
-  version: "0.7.1"
+  version: "0.8.0"
 ---
 
 # GitHub Address Review Comments
@@ -116,3 +116,23 @@ Invoke `address-review-comments` with the payload as arguments in the same sessi
 ## Additional Resources
 
 - [GitHub API guide](references/gh-api-guide.md) — pagination, fetching endpoints, and filtering rules. Read before executing the review-thread query so both threads and their comments are fetched completely.
+
+## Output Language
+
+Write all text for the user in ASD-STE100 Simplified Technical English:
+chat messages, questions, summaries, reports and the Note under each
+diagram. Do not apply it to code, identifiers, file paths, commands, quotes
+or error messages. Keep them exactly as they are.
+
+- Use one word for one meaning. Use simple, common words and keep the
+  same technical name for the same thing.
+- Write sentences of 20 words or fewer for instructions and 25 words or
+  fewer for descriptions. Write one instruction in each sentence.
+- Use the active voice and simple tenses: present, simple past and simple
+  future. Use the imperative for instructions.
+- Keep paragraphs to six sentences or fewer. Use lists and tables for
+  complex information.
+- Use "the" and "a". Do not remove words to make text shorter. Do not use
+  more than three nouns together.
+- When the user writes in a different language, use that language with
+  the same short, simple rules.

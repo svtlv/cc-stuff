@@ -401,6 +401,17 @@ class AutopilotDriver(unittest.TestCase):
         self.assertTrue(all(t['waited_min'] is not None for t in timeouts))
         self.assertEqual(timeouts[2]['waited_min'], 60)
         self.assertIn('tests included', timeouts[2]['reason'])
+        # the report's first section: every choice the user did not make, user answers and notes left out
+        self.drive('log', run['session'], '--kind', 'note', '--text', 'watching the run')
+        self.drive('log', run['session'], '--kind', 'decision', '--by', 'user', '--text', 'Use Redis')
+        without = self.drive('report', '--flow', flow)['without_user']
+        chosen = [w['chosen'] for w in without]
+        self.assertTrue({'In-memory, local', 'accept', 'no', 'fixed flaky test',
+                         'Implement now'} <= set(chosen))
+        self.assertNotIn('Use Redis', chosen)
+        self.assertNotIn('watching the run', chosen)
+        self.assertNotIn('user', {w['by'] for w in without})
+        self.assertIn('agent', {w['by'] for w in without})
 
     def test_milestones_report_each_task_with_its_model_and_commit(self):
         env = dict(self.env, FAKE_MODE='milestones', AUTOPILOT_PROGRESS_S='0.3',

@@ -4,7 +4,7 @@ description: This skill should be used when the user asks to "address Orca revie
 argument-hint: "[worktree-selector]"
 allowed-tools: Bash, Read, Edit, Write, Grep, Glob, Skill
 metadata:
-  version: "0.7.1"
+  version: "0.8.0"
 ---
 
 # Orca Address Review Comments
@@ -80,3 +80,23 @@ Invoke `address-review-comments` with that payload as arguments in the same sess
 If skills were installed separately and a sibling link is unavailable, locate `address-review-comments` in the active skill catalog and resolve its files from that path.
 
 Use the shared skill's summary, mode selection, code fixes, validation, and outcome report. Do not duplicate that workflow or spawn another agent. Leave Orca note cleanup and committing/pushing to the user.
+
+## Output Language
+
+Write all text for the user in ASD-STE100 Simplified Technical English:
+chat messages, questions, summaries, reports and the Note under each
+diagram. Do not apply it to code, identifiers, file paths, commands, quotes
+or error messages. Keep them exactly as they are.
+
+- Use one word for one meaning. Use simple, common words and keep the
+  same technical name for the same thing.
+- Write sentences of 20 words or fewer for instructions and 25 words or
+  fewer for descriptions. Write one instruction in each sentence.
+- Use the active voice and simple tenses: present, simple past and simple
+  future. Use the imperative for instructions.
+- Keep paragraphs to six sentences or fewer. Use lists and tables for
+  complex information.
+- Use "the" and "a". Do not remove words to make text shorter. Do not use
+  more than three nouns together.
+- When the user writes in a different language, use that language with
+  the same short, simple rules.

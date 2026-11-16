@@ -4,7 +4,7 @@ description: This skill should be used when the user runs "/autopilot-setup" or 
 argument-hint: "[tools | key | repo | reconfigure] (default: all, or reconfigure when the repository is already set up)"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion
 metadata:
-  version: "0.2.0"
+  version: "0.3.0"
 ---
 
 # Autopilot Setup
@@ -232,3 +232,23 @@ both tools are independent: one subagent per tool may check versions and
 prepare commands while the user answers the classifier questions. Run the
 installs themselves only after the user approves them. Without subagents, do
 the stages in order.
+
+## Output Language
+
+Write all text for the user in ASD-STE100 Simplified Technical English:
+chat messages, questions, summaries, reports and the Note under each
+diagram. Do not apply it to code, identifiers, file paths, commands, quotes
+or error messages. Keep them exactly as they are.
+
+- Use one word for one meaning. Use simple, common words and keep the
+  same technical name for the same thing.
+- Write sentences of 20 words or fewer for instructions and 25 words or
+  fewer for descriptions. Write one instruction in each sentence.
+- Use the active voice and simple tenses: present, simple past and simple
+  future. Use the imperative for instructions.
+- Keep paragraphs to six sentences or fewer. Use lists and tables for
+  complex information.
+- Use "the" and "a". Do not remove words to make text shorter. Do not use
+  more than three nouns together.
+- When the user writes in a different language, use that language with
+  the same short, simple rules.
