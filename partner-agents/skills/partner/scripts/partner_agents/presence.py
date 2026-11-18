@@ -13,7 +13,7 @@ import os
 import time
 from pathlib import Path
 
-from .state import me_id, read_pause
+from .state import me_id
 from .terminals.tabs import tab_titles
 from .timing import LIVE_WINDOW, MARKER_STALE, TURN_STALE
 from .util import age_seconds, read_float, utcnow
@@ -95,11 +95,12 @@ def listening_soon(sd: Path, roster: dict, who: str, grace: float) -> bool:
 
 
 def turn_open(sd: Path, pid: str) -> bool:
-    """Is a host session agent in the middle of a turn?
+    """Is this agent in the middle of a turn?
 
-    Its background `wait` stays in flight while it works on what the human
-    asked, so `is_listening` cannot tell a session agent that is done from one
-    that is busy. The prompt hook opens the turn, the Stop hook closes it.
+    A Claude agent's background `wait` stays in flight while it works, so
+    `is_listening` cannot tell an agent that is done from one that is busy. The
+    prompt hook opens the turn, the Stop hook closes it -- for every agent
+    whose CLI runs the plugin hooks, tab or session.
     """
     opened = read_float(sd / pid / "turn")
     return opened is not None and time.time() - opened < TURN_STALE
@@ -116,7 +117,7 @@ def last_seen(sd: Path, pid: str) -> str | None:
 
 
 def liveness(sd: Path, roster: dict, window: int = LIVE_WINDOW) -> dict:
-    """Classify every agent as live, stale or stopped, and say why."""
+    """Classify every agent as live, idle, stale or stopped, and say why."""
     me = me_id(roster)
     titles = tab_titles()
     out = {}
@@ -142,10 +143,10 @@ def liveness(sd: Path, roster: dict, window: int = LIVE_WINDOW) -> dict:
             out[pid] = {"state": "stale", "age": None,
                         "why": "never checked in -- may not have started"}
         else:
-            out[pid] = {"state": "stale", "age": age,
-                        "why": f"last acted {int(age // 60)} min ago"}
-        if out[pid]["state"] == "stale" and read_pause(sd):
-            # Quiet because it was told to be, not because its tab died.
-            out[pid] = {"state": "paused", "age": age,
-                        "why": "paused, all work finished -- the next message wakes it"}
+            # Quiet is normal: every agent ends its turn once it owes nothing,
+            # and the next message wakes it. Its tab is still there, or there
+            # is no tab list to say otherwise.
+            out[pid] = {"state": "idle", "age": age,
+                        "why": f"idle {int(age // 60)} min -- the next message "
+                               f"wakes it; `nudge --id {pid}` if it never answers"}
     return out

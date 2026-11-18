@@ -4,7 +4,7 @@ Waking an agent means running its terminal's own CLI -- `orca terminal send`.
 An agent in a sandbox cannot: Codex under `-s workspace-write` is not even
 allowed to read Orca's runtime file, so every nudge it attempted failed. A
 partner that went deaf stayed deaf for as long as the only one noticing was
-sandboxed, and a pause lifted from a sandboxed tab woke nobody.
+sandboxed.
 
 So typing is delegated. An agent whose own attempt fails drops a request in
 <id>/wake.json, and one waker process per session performs it. Any agent may

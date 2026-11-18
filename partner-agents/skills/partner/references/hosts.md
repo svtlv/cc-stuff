@@ -10,20 +10,24 @@ Resolve the script from the active skill catalog entry: `<skill-directory>/scrip
 
 Pass `--me-provider claude` or `--me-provider codex` when starting a session. The runtime detects the host when possible, but an explicit provider wins. `init` and `resume` bind the starting participant to `CLAUDE_CODE_SESSION_ID` or `CODEX_THREAD_ID`; hooks compare their payload's `session_id` to that binding. Another session in the checkout must not adopt the starting participant's tab or open its turn. Old rosters containing `cc_session` still identify their owning Claude session.
 
-The shared `Stop` and `UserPromptSubmit` hooks use the event/input/output schema supported by both hosts. Codex requires the installed hooks to be reviewed and trusted before execution. Install the full plugin, then restart the host session. Hook support depends on the client and configuration; an installed skill alone does not guarantee hooks are active. Follow the loop explicitly when hooks are unavailable.
+The shared `Stop`, `UserPromptSubmit` and `PostToolUse` hooks use the event/input/output schema supported by both hosts. Codex requires the installed hooks to be reviewed and trusted before execution. Install the full plugin, then restart the host session. Hook support depends on the client and configuration; an installed skill alone does not guarantee hooks are active. When hooks are unavailable, run `read` at the start of every turn and answer what it shows before ending the turn.
 
 Treat launcher prompts, automated wake-ups, and hook continuation prompts as automation. They never authorize claiming the baton. A real user instruction does: run `claim` before editing.
 
-## Wait in Claude Code
+## Listening without polling
 
-For the starting session, run one `wait` with Bash `run_in_background: true`. A task notification re-invokes the session after completion. Answer messages, then re-arm. Tab partners can run their wait directly. Never kill processes by a shared name to cancel a wait; use `unwait`.
+No agent polls. An agent that owes nothing ends its turn and costs nothing until input arrives. A busy agent hears new messages through the hooks: `UserPromptSubmit` adds them to the prompt, and `PostToolUse` adds them after each tool call.
 
-## Wait in Codex
+## Listening in Claude Code
 
-Use the available execution tool's actual asynchronous protocol. With `exec_command`, start one `wait --timeout 90` using a short `yield_time_ms`. If the tool returns a running `session_id`, poll that same process with `write_stdin` until exit. A yield returns control while the process continues; it is not an execution timeout. If `functions.exec` itself yields a `cell_id`, resume that call with `functions.wait` before starting another call for the same work.
+Run one `wait --timeout 7000` with Bash `run_in_background: true` and `timeout: 7200000`, then end the turn. The command returns only for a message addressed to you, or just before the 2-hour cap on a background command. Its task notification re-invokes the session. Answer, re-arm one wait, and end the turn again. This is the same for the starting session and for Claude tab partners. Never run it in the foreground. Never kill processes by a shared name to cancel a wait; use `unwait`.
 
-Keep the turn active while polling. A process running after a final answer does not by itself guarantee the host will invoke the model again. Use background completion notifications only when the active host explicitly provides them. Process and cell IDs belong to the tool session, not the partner roster.
+The `Stop` hook holds a Claude agent that ends a turn with no background `wait` armed, because that agent is otherwise deaf. The sleeping wait costs nothing, so the hook can insist on it.
 
-Entering a bound Codex session's polled wait declares its work finished and clears the open-turn marker, allowing idle pausing even while the harness turn stays active. Delivering a work message reopens that marker. A user prompt arriving while an existing wait runs keeps the turn open until the next finished-work declaration. After the wait exits, handle its messages and re-arm one wait. If it exits with an empty timeout, continue listening. If it reports a pause, stop as directed; if it says it is sleeping through a pause, keep that existing process and poll it. Cancel the current listener with `unwait` before claiming the baton and collecting replies with `send --wait`.
+## Listening in Codex
+
+Do not run `wait`. Codex does not re-invoke the model when a background process ends, so a polled wait costs a model turn per poll. End the turn when nothing is owed. When a message leaves the session owing a reply, the waker types a wake-up into its tab, if the tab can be typed into (Orca, tmux, WezTerm, kitty). Otherwise only the user wakes it, by typing in its own session. `read` says which applies.
+
+The `UserPromptSubmit` and `Stop` hooks mark the turn open and closed, so the waker never types into a Codex tab that is mid-turn. The `PostToolUse` hook context in Codex is not yet verified; without it, a busy Codex agent sees new messages at its next `read` or when the `Stop` hook blocks for an owed reply.
 
 See [Claude manifests](https://code.claude.com/docs/en/plugins-reference), [Codex plugin packaging](https://developers.openai.com/plugins/build/plugins), and [Codex hooks](https://learn.chatgpt.com/docs/hooks) for installation and hook support.

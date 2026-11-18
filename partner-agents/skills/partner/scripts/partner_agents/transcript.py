@@ -10,11 +10,51 @@ import re
 from pathlib import Path
 
 from .state import baton_of
-from .timing import REDELIVER_AFTER
+from .timing import HOP_LIMIT, REDELIVER_AFTER
 from .util import NL, age_seconds, utcnow
 
 
 MSG_DELIM = "<!--/msg-->"
+
+# `send --final` starts the body with this. A final message closes a thread: it
+# creates no debt, so it wakes nobody and the Stop hook does not demand a reply.
+# In the body rather than the header so older parsers still read the message.
+FINAL_TAG = "[final -- no reply needed]"
+
+
+def is_final(m: dict) -> bool:
+    return m.get("body", "").startswith(FINAL_TAG)
+
+
+def past_hop_limit(convo: list[dict]) -> set[int]:
+    """Indexes of messages too deep in an advisor-only chain to create a debt.
+
+    A message is an advisor's when its sender did not hold the baton as it was
+    sent. Two advisors can answer each other forever -- every reply is a new
+    debt -- and since every debt now wakes its agent, that loop would cost a
+    model turn per message with nobody asking for it. The baton holder
+    speaking resets the chain.
+    """
+    out, run = set(), 0
+    for i, m in enumerate(convo):
+        if m["from"] == m["baton"]:
+            run = 0
+            continue
+        run += 1
+        if run > HOP_LIMIT:
+            out.add(i)
+    return out
+
+
+def hop_limit_note(sd: Path) -> str:
+    """One line for `wait` and `read` once the current chain is past the limit."""
+    convo = [m for m in tail_msgs(sd, 4 * HOP_LIMIT) if m["from"] != "system"]
+    if not convo or len(convo) - 1 not in past_hop_limit(convo):
+        return ""
+    return (f"{NL * 2}[{HOP_LIMIT} advisor messages in a row without the baton "
+            f"holder: the newest ones create no debt and wake nobody. Do not "
+            f"reply unless you add something new -- send the holder one "
+            f"recommendation, or hand a deadlock to the human.]")
 
 
 def append_msg(sd: Path, sender: str, to: str, body: str, baton: str) -> None:
@@ -133,15 +173,20 @@ def render(msgs: list[dict]) -> str:
         for m in msgs)
 
 
-def pending_for(sd: Path, roster: dict, who: str) -> list[dict]:
+def pending_for(sd: Path, roster: dict, who: str,
+                holder_too: bool = False) -> list[dict]:
     """Messages `who` still owes a reply to.
 
     Empty when `who` holds the baton (it drives the change, it is not waiting on
     anyone), when nothing is addressed to it, or when it has already spoken
     since the last message addressed to it. An agent's own messages never count
     -- it cannot owe itself a reply.
+
+    `holder_too` drops the baton exemption: the waker still has to bring the
+    holder back for advice that arrives after it ended its turn, even though
+    the Stop hook does not demand an answer to it.
     """
-    if baton_of(roster) == who:
+    if baton_of(roster) == who and not holder_too:
         return []
     chat = sd / "chat.md"
     if not chat.exists():
@@ -151,6 +196,7 @@ def pending_for(sd: Path, roster: dict, who: str) -> list[dict]:
     # before it joined is briefing material, not mail it owes a reply to.
     text = raw[_offset(sd, who, "floor", len(raw)):].decode("utf-8", errors="replace")
     convo = [m for m in parse_msgs(text) if m["from"] != "system"]
+    capped = past_hop_limit(convo)
     # Per sender, not one global "since I last spoke" line. With three agents
     # talking, a reply to p1 would otherwise clear the debt to p3 as well -- so
     # a message that arrived alongside another and was never answered became
@@ -168,6 +214,7 @@ def pending_for(sd: Path, roster: dict, who: str) -> list[dict]:
             answered_at[m["to"]] = i
     return [m for i, m in enumerate(convo)
             if m["from"] != who and m["to"] in (who, "@all", "all")
+            and not is_final(m) and i not in capped
             and i > answered_at.get(m["from"], answered_at.get("@all", -1))]
 
 

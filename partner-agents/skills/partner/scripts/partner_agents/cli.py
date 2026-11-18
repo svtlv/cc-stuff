@@ -6,7 +6,7 @@ import argparse
 from .commands.discovery import (
     cmd_check, cmd_models, cmd_probe, cmd_providers, cmd_terminals,
 )
-from .commands.hooks import cmd_hook_prompt, cmd_hook_stop
+from .commands.hooks import cmd_hook_post_tool, cmd_hook_prompt, cmd_hook_stop
 from .commands.messaging import (
     cmd_baton, cmd_claim, cmd_kickoff, cmd_nudge, cmd_pending, cmd_read, cmd_send,
     cmd_unwait, cmd_wait,
@@ -18,7 +18,7 @@ from .commands.session import (
 from .commands.status import cmd_idle, cmd_list, cmd_state
 from .commands.waker import cmd_waker
 from .providers.recipes import AUTO_LEVELS
-from .timing import IDLE_PAUSE, LIVE_WINDOW, WAIT_POLL, WAIT_TIMEOUT
+from .timing import BACKGROUND_WAIT, LIVE_WINDOW, WAIT_POLL
 
 
 def main() -> int:
@@ -120,10 +120,11 @@ def main() -> int:
     ck.add_argument("--force", action="store_true")
     ck.set_defaults(fn=cmd_check)
 
-    w = sub.add_parser("wait", help="block until somebody addresses you")
+    w = sub.add_parser("wait", help="block until somebody addresses you; Claude "
+                                    "agents run it in the background")
     w.add_argument("--for", dest="who", default=None,
                    help="override identity (normally set by your wrapper)")
-    w.add_argument("--timeout", type=int, default=WAIT_TIMEOUT)
+    w.add_argument("--timeout", type=int, default=BACKGROUND_WAIT)
     w.add_argument("--poll", type=float, default=WAIT_POLL)
     w.set_defaults(fn=cmd_wait)
 
@@ -135,8 +136,11 @@ def main() -> int:
     s.add_argument("--file", default=None)
     s.add_argument("--wait", type=int, default=0, help="block N seconds for replies")
     s.add_argument("--expect", type=int, default=0, help="how many repliers to wait for")
+    s.add_argument("--final", action="store_true",
+                   help="close the thread: the message needs no reply and "
+                        "wakes nobody")
     s.add_argument("--no-nudge", action="store_true",
-                   help="do not wake recipients that stopped listening")
+                   help="do not wake recipients")
     s.set_defaults(fn=cmd_send)
 
     ko = sub.add_parser("kickoff", help="open the session: the human's first "
@@ -149,9 +153,9 @@ def main() -> int:
     ko.add_argument("--expect", type=int, default=0)
     ko.set_defaults(fn=cmd_kickoff)
 
-    ng = sub.add_parser("nudge", help="wake agents that stopped looping by "
-                                      "typing into their tabs")
-    ng.add_argument("--id", default=None, help="one agent; omit for everyone silent")
+    ng = sub.add_parser("nudge", help="wake agents by typing into their tabs")
+    ng.add_argument("--id", default=None,
+                    help="one agent; omit for every idle agent that owes a reply")
     ng.add_argument("--all", action="store_true", help="every agent but you")
     ng.add_argument("--text", default=None, help="why they are being woken")
     ng.set_defaults(fn=cmd_nudge)
@@ -159,12 +163,8 @@ def main() -> int:
     sub.add_parser("unwait", help="stop your own `wait` -- never kill by pattern"
                    ).set_defaults(fn=cmd_unwait)
 
-    idl = sub.add_parser("idle", help="whether every agent has finished, and "
-                                      "when the loops pause")
-    idl.add_argument("--after", type=int, default=None,
-                     help=f"seconds every agent must be finished before the "
-                          f"loops pause (default {IDLE_PAUSE}; 0 turns it off)")
-    idl.set_defaults(fn=cmd_idle)
+    sub.add_parser("idle", help="what every agent is doing, and how a message "
+                                "reaches it").set_defaults(fn=cmd_idle)
 
     r = sub.add_parser("read")
     r.add_argument("--for", dest="who", default=None,
@@ -203,6 +203,8 @@ def main() -> int:
                    ).set_defaults(fn=cmd_hook_stop)
     sub.add_parser("hook-prompt", help="internal: UserPromptSubmit hook"
                    ).set_defaults(fn=cmd_hook_prompt)
+    sub.add_parser("hook-post-tool", help="internal: PostToolUse hook"
+                   ).set_defaults(fn=cmd_hook_post_tool)
     sub.add_parser("waker", help="internal: types wake-ups for agents that cannot"
                    ).set_defaults(fn=cmd_waker)
 

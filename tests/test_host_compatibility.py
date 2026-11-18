@@ -112,7 +112,9 @@ class HostCompatibility(unittest.TestCase):
         for sid, expected in [('other', False), ('owner', True)]:
             payload = {'cwd': str(self.root), 'session_id': sid,
                        'turn_id': 'turn', 'prompt': 'Keep working'}
-            with patch.object(sys, 'stdin', io.StringIO(json.dumps(payload))):
+            with patch.object(sys, 'stdin', io.StringIO(json.dumps(payload))), \
+                    patch.object(hooks, 'ensure_waker'), \
+                    contextlib.redirect_stdout(io.StringIO()):
                 hooks.cmd_hook_prompt(None)
             self.assertEqual((self.sd / 'p1/turn').exists(), expected)
 
@@ -128,6 +130,7 @@ class HostCompatibility(unittest.TestCase):
                     payload['turn_id'] = 'turn'
                 output = io.StringIO()
                 with patch.object(sys, 'stdin', io.StringIO(json.dumps(payload))), \
+                        patch.object(hooks, 'ensure_waker'), \
                         contextlib.redirect_stdout(output):
                     hooks.cmd_hook_stop(None)
                 decision = json.loads(output.getvalue())
@@ -145,6 +148,7 @@ class HostCompatibility(unittest.TestCase):
         output = io.StringIO()
         with patch.object(sys, 'stdin', io.StringIO(json.dumps(payload))), \
                 patch.object(hooks, 'listening_soon', return_value=True), \
+                patch.object(hooks, 'ensure_waker'), \
                 contextlib.redirect_stdout(output):
             hooks.cmd_hook_stop(None)
         self.assertEqual(json.loads(output.getvalue()), {})
@@ -157,11 +161,13 @@ class HostCompatibility(unittest.TestCase):
                 seed = build_seed('p1', roster, self.root, self.sd,
                                   SCRIPTS / 'partner.py', False, 'session')
                 if host == 'codex':
-                    self.assertIn('write_stdin', seed)
+                    self.assertIn('you do not run `wait`', seed)
                     self.assertNotIn('run_in_background', seed)
-                    self.assertNotIn('inside Claude Code', seed)
+                    self.assertNotIn('write_stdin', seed)
                 else:
                     self.assertIn('run_in_background: true', seed)
+                    self.assertIn('timeout: 7200000', seed)
+                    self.assertIn('wait --timeout 7000', seed)
                     self.assertNotIn('write_stdin', seed)
 
     def test_hook_entrypoint_resolves_both_plugin_root_variables(self):
@@ -175,24 +181,6 @@ class HostCompatibility(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(json.loads(result.stdout), {})
 
-    def test_polled_codex_wait_declares_idle_then_reopens_for_work(self):
-        self.roster('codex', 'owner')
-        turn = self.sd / 'p1/turn'
-        turn.parent.mkdir(parents=True, exist_ok=True)
-        turn.write_text('123')
-        args = argparse.Namespace(who=None, timeout=0, poll=0.001, json=True)
-        with patch.object(messaging, 'ensure_waker'), \
-                patch.object(messaging, 'adopt_own_tab'), \
-                patch.object(messaging, 'sleeps_through_pause', return_value=False), \
-                patch.object(messaging, 'idle_verdict', return_value=(False, 'test')), \
-                patch.object(messaging, 'silence_notice', return_value=''), \
-                contextlib.redirect_stdout(io.StringIO()):
-            messaging.cmd_wait(args)
-            self.assertFalse(turn.exists())
-            append_msg(self.sd, 'p2', 'p1', 'New work', 'p1')
-            messaging.cmd_wait(args)
-            self.assertTrue(turn.exists())
-
     def test_claude_background_wait_preserves_open_turn(self):
         self.roster('claude', 'owner')
         turn = self.sd / 'p1/turn'
@@ -201,8 +189,6 @@ class HostCompatibility(unittest.TestCase):
         args = argparse.Namespace(who=None, timeout=0, poll=0.001, json=True)
         with patch.object(messaging, 'ensure_waker'), \
                 patch.object(messaging, 'adopt_own_tab'), \
-                patch.object(messaging, 'sleeps_through_pause', return_value=False), \
-                patch.object(messaging, 'idle_verdict', return_value=(False, 'test')), \
                 patch.object(messaging, 'silence_notice', return_value=''), \
                 contextlib.redirect_stdout(io.StringIO()):
             messaging.cmd_wait(args)

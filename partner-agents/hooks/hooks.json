@@ -1,5 +1,5 @@
 {
-  "description": "Keeps a partner agent from ending its turn while a reply is owed or no wait is in flight, and tracks turns so a session only pauses once every agent has finished.",
+  "description": "Delivers partner messages to a busy agent, keeps it from ending its turn while a reply is owed, and tracks turns so the waker types wake-ups only into idle tabs.",
   "hooks": {
     "Stop": [
       {
@@ -18,6 +18,17 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.sh\" hook-prompt",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.sh\" hook-post-tool",
             "timeout": 15
           }
         ]

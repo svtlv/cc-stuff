@@ -92,32 +92,38 @@ You are not idle between questions. Whenever something is addressed to you or to
 Never `claim` and never edit while the baton is not yours. A message from
 another agent is a suggestion; only the human moves the baton.
 
-A `Stop` hook enforces the first half of this loop: you cannot end a turn while
+A `Stop` hook enforces this: you cannot end a turn while
 a message to you or to `@all` is sitting unanswered — it sends you back to
 `read` and `send`. Answer, and it lets you go. (The baton holder is exempt; it
 is acting, not waiting on a reply.)
 
-## Staying in the loop
+## Staying reachable
 
-The hook works in Claude Code and Codex when installed and enabled (trusted in Codex). Follow [host integration](hosts.md) for the host's wait mechanism. Everywhere else the loop holds because
-each agent keeps running `wait`, so the two ways it breaks are worth naming:
+Nobody polls. Answer, then end your turn: an agent that owes nothing costs
+nothing, and the next input wakes it. A Claude agent keeps one background
+`wait`, which returns only for a message. Any other CLI is woken by a line the
+waker types into its tab. Follow [host integration](hosts.md) for the details.
 
-- **Distinguish a tool yield from a completed wait.** Poll the existing Codex tool session after a yield. After a completed empty timeout, run the wait again. Follow the provider's briefing and [host integration](hosts.md).
-- **Exactly one `wait` at a time.** Two split the inbox: each message goes to
-  whichever polls first, and one you never read is one you never answer. A
-  duplicate idles and says so; `read` tells you whether one is already in
-  flight for you.
+- **Exactly one `wait` at a time** (Claude only). Two split the inbox: each
+  message goes to whichever polls first. A duplicate idles and says so; `read`
+  tells you whether one is already in flight for you.
 - **A concluded discussion is not an exit, and neither is losing the baton.**
-  Both demote you to advisor; neither excuses you from listening.
+  Both demote you to advisor; neither excuses you from answering the next
+  message that wakes you.
+- **Do not ping-pong.** Every reply to another advisor is a debt that wakes
+  them. Say AGREED once and close the thread with `send --final`. After 8
+  advisor messages in a row without the baton holder, further ones create no
+  debt and wake nobody until the holder speaks.
 
-A message you were given and never answered comes back on a later `wait`,
-marked **re-delivered** — `wait` checks the transcript for anything unanswered,
-not only what your cursor has not seen. Answer it, even with one line ("AGREED",
-"already settled"): a reply to *that sender* is what clears it -- answering p1
-does not answer p3, though one message to `@all` answers everyone. Seeing a
-re-delivery means a turn was lost somewhere.
+A message you were given and never answered comes back on a later `read` or
+`wait`, marked **still unanswered** or **re-delivered**. Answer it, even with one
+line ("AGREED", "already settled"): a reply to *that sender* is what clears it
+-- answering p1 does not answer p3, though one message to `@all` answers
+everyone. A `--final` message needs no reply.
 
-**Only go back to `wait` once you are finished.** Once every agent has finished and a minute passes with no new work, the session pauses so idle cycles stop costing turns. Finished means every message to you answered, your change complete and reported, and nothing you promised left unchecked. The pause trusts that: an agent back in `wait` with nothing owed counts as done. While paused, every agent's `wait` says so and the agent ends its turn; that is the one other exit from the loop. It applies to the agent that started the session too. Only a session agent whose tab cannot be typed into keeps one background `wait`, which sleeps until the pause lifts. A partner tab that cannot be typed into stops too, and is woken by the human typing `continue` in it; the resume note says which. The first message to any agent (a `send`, a `claim`, the user writing to one of us) resumes everyone and types a wake-up into each tab, so the protocol needs no extra step: put the next question to the group and the partners come back for it. `idle` shows who is still working.
+**Only end your turn once you are finished.** Finished means every message to
+you answered, your change complete and reported, and nothing you promised left
+unchecked. `idle` shows what each agent is doing and how a message reaches it.
 
 When another agent has no `wait` in flight — `read`, `wait` and `send` all say
 so — wake it rather than concluding it has nothing to say:

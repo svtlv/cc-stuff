@@ -12,8 +12,8 @@ AUTO LEVELS
   full   no prompts and no sandbox
 
 `auto` is the default because `edits` still asks before every shell command
--- including the partner's own `wait` loop, so a partner launched that way
-sits at a prompt in a tab nobody is watching. A CLI with no reviewer of its
+-- including the partner's own `read` and `send`, so a partner launched that
+way sits at a prompt in a tab nobody is watching. A CLI with no reviewer of its
 own (gemini) gets its no-prompt mode at `auto`.
 
 Flags verified against claude 2.x and codex 0.5x. They drift between
@@ -73,24 +73,16 @@ RECIPES: dict[str, dict] = {
                "install": "npm install -g @anthropic-ai/claude-code",
                "login": "claude  (then /login)",
                "wait_note": (
-                   "Your Bash tool times out at 120s by default (600s max), so "
-                   "keep `wait` under that -- its own default is 90s -- or pass "
-                   "a longer tool timeout. A wait that returns with nothing is "
-                   "normal: run it again.")},
+                   "A background Bash command may run for up to 7200000 ms; "
+                   "the foreground cap (120s by default, 600s max) does not "
+                   "apply to it. Pass the timeout explicitly, or the default "
+                   "of 30 minutes kills the wait early and costs a turn.")},
     "codex": {"bin": "codex", "tui": _codex_tui, "effort": "flag",
               # A real API field, so only values the API accepts work here.
               # "max" is this skill's own level -- it maps onto "high".
               "efforts": {"low", "medium", "high"},
               "install": "npm install -g @openai/codex",
-              "login": "codex login",
-              "wait_note": (
-                   "exec_command may yield a session_id while the process is "
-                   "still running. Poll that id with write_stdin until exit; "
-                   "yield_time_ms controls when output is returned, not the "
-                   "process lifetime. In code mode, if functions.exec yields "
-                   "a cell_id, resume it with functions.wait. Keep exactly one "
-                   "partner wait running. Re-arm only after it exits and its "
-                   "messages are handled; an empty timeout is normal.")},
+              "login": "codex login"},
     "gemini": {"bin": "gemini", "tui": _gemini_tui, "effort": "prompt",
                "efforts": set(EFFORT_HINT),
                "install": "npm install -g @google/gemini-cli",

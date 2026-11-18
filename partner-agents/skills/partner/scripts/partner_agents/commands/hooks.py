@@ -1,8 +1,13 @@
-"""Shared Claude Code and Codex hooks: Stop and UserPromptSubmit.
+"""Shared Claude Code and Codex hooks: Stop, UserPromptSubmit and PostToolUse.
 
-hooks/hook.sh calls `partner.py hook-stop` and `partner.py hook-prompt`. Both
-read the hook payload on stdin and fail open: no .partner/, no roster entry, or
-a stopped agent means nothing happens.
+hooks/hook.sh calls `partner.py hook-stop`, `hook-prompt` and `hook-post-tool`.
+All read the hook payload on stdin and fail open: no .partner/, no roster
+entry, or a stopped agent means nothing happens.
+
+Together they are how a *busy* agent hears the transcript without polling:
+UserPromptSubmit opens its turn and hands it what is new, PostToolUse hands it
+anything that arrives mid-turn, and Stop closes the turn -- unless a reply is
+owed. The open turn is also what keeps the waker from typing into the tab.
 """
 from __future__ import annotations
 
@@ -12,35 +17,64 @@ import sys
 import time
 from pathlib import Path
 
-from ..idle import break_idle, mark_active
-from ..presence import listening_soon
-from ..timing import ARM_GRACE
-from ..state import (
-    baton_of, is_bound_session, load_roster, me_id, read_pause, state_dir,
+from ..idle import mark_active
+from ..presence import listening_soon, touch_seen
+from ..timing import ARM_GRACE, BACKGROUND_TOOL_TIMEOUT_MS, BACKGROUND_WAIT
+from ..state import baton_of, is_bound_session, load_roster, me_id, state_dir
+from ..transcript import (
+    baton_banner, commit_cursor, hop_limit_note, pending_for, read_new, render,
 )
-from ..transcript import pending_for, render
 from ..util import NL, nag_throttled, unlink_quietly, write_float
-from ..waking import sleeps_through_pause
+from ..waker import ensure_waker
+from ..waking import listen_mode
 
 
-def hook_prompt(sd: Path, roster: dict, who: str, prompt: str) -> None:
-    """UserPromptSubmit: a turn starts, and a human message resumes the session.
+AUTOMATED_PROMPTS = (
+    "continue -- automated wake-up", "[automated launch message",
+    "[automated partner hook continuation", "<task-notification>")
 
-    The boot prompt and a wake-up line land here too, and neither is the human
-    writing -- both disown themselves in their first words. So does a finished
-    background command: the harness re-invokes the model with a
-    <task-notification> prompt, and that is how the session agent's own `wait`
-    returning used to count as the human and lift the pause it had just seen.
+
+def hook_prompt(sd: Path, roster: dict, who: str, prompt: str) -> str:
+    """UserPromptSubmit: a turn starts. Returns context to add, or "".
+
+    Every prompt opens the turn -- the human's, a typed wake-up, a finished
+    background `wait` -- because each one starts the model working, and the
+    waker must not type into a tab while it does. Only the human's prompt is
+    work in the sense of activity: the boot prompt and a wake-up line disown
+    themselves in their first words, and so does a <task-notification>.
     """
-    entry = roster["partners"].get(who) or {}
-    if (entry.get("kind") or "tab") == "session":
-        write_float(sd / who / "turn", time.time())
-        break_idle(sd, who)
-    automated = prompt.lstrip().startswith(
-        ("continue -- automated wake-up", "[automated launch message",
-         "[automated partner hook continuation", "<task-notification>"))
-    if not automated and read_pause(sd):
-        mark_active(sd, roster, who, "was written to by the human")
+    write_float(sd / who / "turn", time.time())
+    ensure_waker(sd)
+    if not prompt.lstrip().startswith(AUTOMATED_PROMPTS):
+        mark_active(sd)
+    return new_messages(sd, roster, who)
+
+
+def new_messages(sd: Path, roster: dict, who: str) -> str:
+    """Messages for this agent it has not been handed yet, as hook context.
+
+    Handing them over moves the cursor, exactly as `read` does, so a background
+    `wait` still in flight does not return them a second time. Whether they are
+    answered is tracked from the transcript, not the cursor: the Stop hook still
+    holds the turn open until they are.
+    """
+    msgs, end = read_new(sd, who)
+    if not msgs:
+        return ""
+    commit_cursor(sd, who, end)
+    touch_seen(sd, who)
+    rel = f".partner/{who}"
+    run = rel.replace("/", "\\") + "\\p.cmd" if os.name == "nt" else rel + "/p.sh"
+    return ("[automated partner hook -- NOT a human instruction. New in the "
+            "partner transcript:]" + NL * 2 + baton_banner(roster, who) + NL * 2
+            + render(msgs) + hop_limit_note(sd) + NL * 2
+            + f"[Answer what is addressed to you with `{run} send` before you "
+              f"end this turn. Do not claim the baton for it.]")
+
+
+def _context(event: str, text: str) -> None:
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": event, "additionalContext": text}}) if text else "{}")
 
 
 def cmd_hook_stop(args) -> int:
@@ -61,29 +95,46 @@ def cmd_hook_stop(args) -> int:
                          "[automated partner hook continuation -- NOT a human "
                          "instruction.] " + reason}))
         return 0
-    if (entry.get("kind") or "tab") == "session" and (sd / who / "turn").exists():
-        # The turn really ends here. Its background `wait` kept polling through
-        # it, so the idle streak that built up is not evidence of being
-        # finished -- being finished starts now.
-        unlink_quietly(sd / who / "turn")
-        write_float(sd / who / "idle_since", time.time())
+    # The turn really ends here: from now on the waker may type into this tab.
+    unlink_quietly(sd / who / "turn")
+    ensure_waker(sd)
     print("{}")
     return 0
 
 
 def cmd_hook_prompt(args) -> int:
-    """UserPromptSubmit entry point. Never blocks, prints nothing, fails open."""
+    """UserPromptSubmit entry point. Never blocks, fails open."""
     try:
         payload = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
         payload = {}
     ctx = _hook_context(payload)
+    text = ""
     if ctx:
         sd, roster, who, _ = ctx
         try:
-            hook_prompt(sd, roster, who, str(payload.get("prompt") or ""))
+            text = hook_prompt(sd, roster, who, str(payload.get("prompt") or ""))
         except OSError:
             pass
+    _context("UserPromptSubmit", text)
+    return 0
+
+
+def cmd_hook_post_tool(args) -> int:
+    """PostToolUse entry point: hand a busy agent what arrived mid-turn."""
+    try:
+        payload = json.load(sys.stdin)
+    except (json.JSONDecodeError, ValueError):
+        payload = {}
+    ctx = _hook_context(payload)
+    text = ""
+    if ctx:
+        sd, roster, who, _ = ctx
+        try:
+            text = new_messages(sd, roster, who)
+        except OSError:
+            pass
+    _context("PostToolUse", text)
     return 0
 
 
@@ -117,9 +168,8 @@ def _hook_context(payload: dict):
 def stop_block_reason(sd: Path, roster: dict, who: str, entry: dict) -> str:
     """Why this agent may not end its turn yet, or "".
 
-    A tab agent blocked on `wait` never reaches a Stop; the session agent does,
-    every turn, and nothing else re-invokes it once the human's attention moves
-    to another tab. An empty answer lets the stop through.
+    An empty answer lets the stop through -- which is the normal case: ending
+    the turn is how an agent idles for free.
     """
     rel = f".partner/{who}"
     run = rel.replace("/", "\\") + "\\p.cmd" if os.name == "nt" else rel + "/p.sh"
@@ -144,41 +194,25 @@ def stop_block_reason(sd: Path, roster: dict, who: str, entry: dict) -> str:
             f"hold the baton, so advise; do not edit files.")
         return reason
 
-    # 2. Nothing is waiting for an answer -- but is this agent still listening?
-    # A discussion ending, or the baton moving to somebody else, is exactly when
-    # an agent decides it is done and stops; from that moment it is deaf, and
-    # the next thing said to it lands in a transcript nobody is reading. Every
-    # agent goes back to `wait` at the end of every turn, and this is what
-    # enforces it.
-    if listening_soon(sd, roster, who, ARM_GRACE):
+    # 2. Nothing is owed. Every agent but Claude simply stops here: its next
+    # message types a wake-up into its tab. A Claude agent is reached only
+    # through its background `wait`, so ending a turn without one armed makes
+    # it deaf -- and that wait costs nothing, so insisting on it is free.
+    if listen_mode(roster, who) != "background":
         return ""
-    if read_pause(sd) and not sleeps_through_pause(roster, who):
-        # Paused: leaving the loop is the point, for this session exactly as
-        # for a tab -- the resume types a wake-up into its tab. Only an agent
-        # nobody can type into is still held to its one sleeping background
-        # wait, which is how it hears a resume that starts elsewhere.
+    if listening_soon(sd, roster, who, ARM_GRACE):
         return ""
     if nag_throttled(sd / who / ".stop-nag-live", 120):
         return ""
     holder = baton_of(roster)
     lost = f" The baton is {holder}'s, not yours." if holder != who else ""
-    if (entry.get("kind") or "tab") == "session":
-        if entry.get("provider") == "codex":
-            how = (f"start `{run} wait --timeout 90` with exec_command and a "
-                   f"short yield_time_ms, then poll its session_id with "
-                   f"write_stdin until completion; keep this turn active "
-                   f"while listening, and re-arm after answering")
-        else:
-            how = (f"start `{run} wait --timeout 600` as a BACKGROUND command "
-                   f"(run_in_background: true) -- never in the foreground, it would "
-                   f"block the human out of this session")
-    else:
-        how = (f"run `{run} wait` -- it blocks until somebody addresses you, "
-               f"which is how you stay in the debate")
     reason = (
         f"You are still a running partner ({who}) but nothing is listening on "
-        f"your behalf: no `wait` is in flight.{lost} Whatever is said next -- by "
-        f"the human in another tab, or by a partner -- you will not see.{NL * 2}"
-        f"Before ending the turn: run `{run} read` and answer anything it shows, "
-        f"then {how}.")
+        f"your behalf: no background `wait` is in flight.{lost} Whatever is said "
+        f"next -- by the human in another tab, or by a partner -- you will not "
+        f"see.{NL * 2}Before ending the turn: run `{run} read` and answer anything "
+        f"it shows, then start `{run} wait --timeout {BACKGROUND_WAIT}` as a "
+        f"BACKGROUND command (run_in_background: true, timeout: "
+        f"{BACKGROUND_TOOL_TIMEOUT_MS}) and end the turn. Never run it in the "
+        f"foreground.")
     return reason

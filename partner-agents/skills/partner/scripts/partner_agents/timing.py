@@ -9,10 +9,6 @@ from __future__ import annotations
 
 WAIT_POLL = 3.0
 
-# Keep each wait below Claude's default Bash timeout while stamping heartbeats
-# inside LIVE_WINDOW. Codex execution tools can yield a still-running process;
-# their yield interval is not a command lifetime -- see the provider wait_note.
-WAIT_TIMEOUT = 90
 
 NUDGE_WINDOW = 120         # seconds between nudges to the same silent agent
 
@@ -36,16 +32,25 @@ REDELIVER_WINDOW = 90      # seconds between re-deliveries of the same backlog
 # or two instead of waiting out a deadline that will never arrive.
 MARKER_STALE = 15
 
-LIVE_WINDOW = 360          # seconds; `wait` returns within WAIT_TIMEOUT and loops
+LIVE_WINDOW = 360          # seconds since an agent last acted for it to count as live
 
-IDLE_PAUSE = 60            # seconds every agent must sit finished before pausing
+# A Claude agent listens through one background `wait` and ends its turn. The
+# harness re-invokes it only when that command returns, so the wait returns
+# only for a message -- or just before the harness's own cap on a background
+# command (7200000 ms) would kill it. That is one model turn per two idle hours
+# instead of one per 90-second cycle of the old foreground loop.
+BACKGROUND_WAIT = 7000
+BACKGROUND_TOOL_TIMEOUT_MS = 7200000
 
-IDLE_CHECK = 15            # how often a polling `wait` re-asks the question
+# Advisors may owe each other a reply forever: every reply is a new debt. Once
+# this many messages in a row came from agents that do not hold the baton, the
+# chain stops creating debts -- nobody is woken or held by the Stop hook for it
+# -- until the baton holder or the human speaks again.
+HOP_LIMIT = 8
 
-# Between two empty `wait`s an agent spends one model turn re-arming. A gap no
-# longer than this continues its idle streak; a longer one means it was doing
-# something, and the streak starts over.
-REARM_GAP = 60
+# How often the waker re-checks for owed replies when chat.md has not changed,
+# so a wake-up the agent never acted on is retried after NUDGE_WINDOW.
+WAKE_RECHECK = 15
 
 # A turn marker older than this is from a turn that never reached Stop -- an
 # interrupt -- and stops counting as work in progress.
@@ -57,7 +62,7 @@ TURN_STALE = 1800
 # `send` refreshes and which is how a deaf session agent used to slip through.
 ARM_GRACE = 5
 
-WAKER_POLL = 1.0           # how often the waker looks for wake-up requests
+WAKER_POLL = 1.0           # how often the waker looks at chat.md and wake requests
 WAKER_STALE = 10           # a waker heartbeat older than this is a dead waker
 WAKER_RELAUNCH = 60        # at most one attempt per this many seconds to start one
 WAKE_REQUEST_TTL = 120     # an older request describes a moment that has passed

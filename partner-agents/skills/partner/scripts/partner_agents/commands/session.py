@@ -70,7 +70,7 @@ def cmd_init(args) -> int:
     if roster.get("baton") not in roster["partners"]:
         roster["baton"] = me
     save_roster(sd, roster)
-    adopt_own_tab(sd, roster, me)        # so a pause can stop it like the rest
+    adopt_own_tab(sd, roster, me)        # so a message can type it awake
     ensure_waker(sd)
 
     write_wrappers(sd, SCRIPT)            # shared, for humans
@@ -164,9 +164,7 @@ def cmd_spawn(args) -> int:
     entry["runner"] = str(runner)
     save_roster(sd, roster)
     ensure_waker(sd)             # spawn just drove the terminal, so it can type
-    # A new voice is work for everyone already here. The newcomer itself is
-    # skipped by the wake-up: it is still booting.
-    mark_active(sd, roster, me_id(roster), f"spawned {pid}")
+    mark_active(sd)
 
     # Tell the others somebody arrived. Without this a new agent is invisible
     # until it happens to speak, and the existing ones cannot address it.
@@ -343,8 +341,7 @@ def cmd_resume(args) -> int:
         write_wrappers(sd, script, me)
         write_briefing(sd, me, roster, root, script, None, kind="session")
 
-    # Every tab is relaunched below, so there is nobody to type a wake-up into;
-    # the stamp keeps the fresh agents from pausing before they have spoken.
+    # A pause marker from an older version belongs to the run it paused.
     unlink_quietly(sd / "paused.json")
     write_float(sd / "activity", time.time())
     for pid in roster["partners"]:

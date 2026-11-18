@@ -4,7 +4,7 @@ description: This skill should be used when the user asks to "create a partner",
 argument-hint: "[provider] [model] [effort]  ·  add [provider ...] | resume [id] | sessions | list | baton <id> | idle | stop"
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob, AskUserQuestion, WebSearch, WebFetch, Skill
 metadata:
-  version: "1.4.0"
+  version: "1.5.0"
 ---
 
 # Partner
@@ -27,7 +27,7 @@ After `init` a short wrapper also exists at `.partner/p.cmd` (Windows) or `.part
 
 Use `/partner-agents:partner` in Claude Code and `$partner` in Codex. Interpret `/partner` below as shorthand for either invocation. Use the host's available shell, file, search, question, and skill-loading tools; Claude tool names in frontmatter do not require those tools in Codex. When no Skill tool exists, read the requested skill's `SKILL.md` and follow it in the current session.
 
-Resolve `P` from the active skill's installed directory: `<skill-directory>/scripts/partner.py`. In hooks, `${PLUGIN_ROOT}` (Codex) or `${CLAUDE_PLUGIN_ROOT}` (Claude Code and Codex compatibility) points to the plugin root. These variables are not guaranteed in ordinary skill shell calls; never guess a cache path. Read [host integration](references/hosts.md) before starting a session or entering its wait loop.
+Resolve `P` from the active skill's installed directory: `<skill-directory>/scripts/partner.py`. In hooks, `${PLUGIN_ROOT}` (Codex) or `${CLAUDE_PLUGIN_ROOT}` (Claude Code and Codex compatibility) points to the plugin root. These variables are not guaranteed in ordinary skill shell calls; never guess a cache path. Read [host integration](references/hosts.md) before starting a session or arming its background `wait`.
 
 ## The write baton
 
@@ -62,7 +62,7 @@ Because partners run unprompted this is a rule they keep, not a wall they hit. T
 | `/partner` — alone, or `/partner <provider> [model] [effort]` | **start a new session** | `spawn --fresh` — archive the current session, then bring up **one** new partner on a clean slate |
 | `/partner add [provider ...]` | **add to the session in progress** | `spawn` *without* `--fresh` — another partner joins the ones already running; nothing is archived |
 | `/partner resume [id]` | bring a session back | `resume [--session <id>]` — every agent rebuilt and re-briefed from its transcript |
-| `/partner idle` | who is still working, and whether the loops will pause | `idle [--after N]` |
+| `/partner idle` | what every agent is doing, and how a message reaches it | `idle` |
 | `/partner sessions` · `list` · `baton <id>` · `stop` | inspect or manage | the matching command |
 
 The bare form is a *fresh* session because that is the common case: the user sat down to think a new problem through. Reach for `add` only when partners are already live and the user wants one more voice in that same argument.
@@ -73,7 +73,7 @@ The bare form is a *fresh* session because that is the common case: the user sat
 python "$P" state
 ```
 
-`status: running` in the roster is only a claim — an agent whose tab was closed still says it. `state` uses evidence: every agent stamps a heartbeat when it acts, so **live** means it did something in the last few minutes, and inside Orca the tab list corroborates. It reports `live`, `stale`, `paused` and `stopped` agents and the archived sessions.
+`status: running` in the roster is only a claim — an agent whose tab was closed still says it. `state` uses evidence: every agent stamps a heartbeat when it acts, so **live** means it did something in the last few minutes, and inside Orca the tab list corroborates. It reports `live`, `idle`, `stale` and `stopped` agents and the archived sessions. **Idle** is normal: every agent ends its turn once it owes nothing.
 
 `state` is **informational** — the invocation above already decided the shape of the work. Use `state` to narrate the consequence:
 
@@ -98,7 +98,7 @@ python "$P" resume --session 20260905-185718     # bring an archived one back
 
 ## Starting a partner
 
-**The job is not done until a partner is running in a tab and the session has something to argue about.** Registering yourself, checking a provider, asking which model — all steps *towards* that, never the result. Stop at any of them and the user has an empty roster. Finish with `list` showing at least two running agents, a `kickoff` in the transcript, and a background `wait` armed.
+**The job is not done until a partner is running in a tab and the session has something to argue about.** Registering yourself, checking a provider, asking which model — all steps *towards* that, never the result. Stop at any of them and the user has an empty roster. Finish with `list` showing at least two running agents, a `kickoff` in the transcript, and — in Claude Code — a background `wait` armed.
 
 ### Step 1 — Settle the configuration
 
@@ -171,13 +171,13 @@ python "$P" spawn ... --terminal kitty   # or PARTNER_TERMINAL=kitty
 
 `terminals` also says whether an agent in that terminal **can be typed into** later, which decides whether a stalled partner can be woken automatically. If nothing can open a tab, `spawn` prints the command for the user to run — relay that rather than calling the spawn failed (`references/terminals.md`).
 
-The tab runs the provider's normal interface on a briefing that tells it to loop: block on `wait`, reply, repeat. The user can read the debate as it happens, interrupt at any moment, and type at that agent — it answers them, then resumes.
+The tab runs the provider's normal interface on a briefing that tells it to answer and then end its turn. Nothing polls: a Claude partner keeps one background `wait` that returns only for a message, and any other CLI is woken by a line typed into its tab. The user can read the debate as it happens, interrupt at any moment, and type at that agent — it answers them, then goes idle again.
 
 Confirm with `python "$P" list` before reporting success. Two or more agents means it worked; only yourself means the spawn never happened — say that plainly rather than describing what was set up.
 
 ### Step 4 — Ask what to start on, then open the session
 
-A briefed roster is not yet a debate: everyone is blocked on `wait` and nobody has been asked anything. So ask, with the host's question tool, or a direct question when unavailable, and **accept anything as the answer**:
+A briefed roster is not yet a debate: everyone is idle and nobody has been asked anything. So ask, with the host's question tool, or a direct question when unavailable, and **accept anything as the answer**:
 
 - **Free text** — a task, a question, a bug, a half-formed doubt. It becomes the opening instruction, verbatim.
 - **Another skill or slash command** — `/brainstorm`, `/planning:make`, a project skill. Invoke it and run *its* workflow, with the debate protocol wrapped around the decisions it reaches; the partners do not have that skill, so relay what they need in order to argue with it.
@@ -190,78 +190,71 @@ python "$P" kickoff --text "<what the user said>" --wait 240   # claim the baton
 python "$P" kickoff                                            # they gave you nothing
 ```
 
-Bare `kickoff` sends the **orientation brief**: the agents split this repository between them, read it, cite `path:line`, and converge on one shared picture in at most two rounds, **editing nothing**, then return to `wait` — so the first real question is not answered from a cold read. Skip it and just wait when the context is already there (a resumed session, a `--context` briefing that says what the work is) or when the user asked to be left alone; say which in one line. Details: `references/debate.md`.
+Bare `kickoff` sends the **orientation brief**: the agents split this repository between them, read it, cite `path:line`, and converge on one shared picture in at most two rounds, **editing nothing**, then end their turns — so the first real question is not answered from a cold read. Skip it and just wait when the context is already there (a resumed session, a `--context` briefing that says what the work is) or when the user asked to be left alone; say which in one line. Details: `references/debate.md`.
 
-### Step 5 — Enter the loop yourself, before ending the turn
+### Step 5 — Make sure this session hears the partners, then end the turn
 
-**Spawning a partner is not the end of the task.** The partner blocks on `wait` in its tab, so it hears everything. This session does not block, and nothing re-invokes it on its own — so unless it arms a listener now, it drops out of the debate the moment the user starts typing in the partner's tab, and the partner argues with nobody.
+**Spawning a partner is not the end of the task.** The user may start typing in the partner's tab, and the debate must still reach this session. Nothing polls in this plugin — an agent that owes nothing ends its turn and costs nothing until input arrives. How it is reached depends on its CLI:
 
-Two commands, always, as the last thing in this turn:
+| Agent | How a message reaches it after its turn ended | Idle cost |
+|---|---|---|
+| Claude (this session or a tab) | one background `wait` returns; the task notification re-invokes it | one turn per ~2 h |
+| Any other CLI, tab that can be typed into | the waker types a wake-up line into the tab | none |
+| Any other CLI, tab that cannot be typed into | only the human, by typing in its tab | none |
+
+As the last thing in this turn:
 
 ```bash
-python "$P" read                     # 1. pick up anything already said
-python "$P" wait --timeout 600       # 2. run this as a BACKGROUND command
+python "$P" read                         # 1. pick up anything already said
+python "$P" wait --timeout 7000          # 2. Claude Code only: a BACKGROUND command
 ```
 
-In Claude Code, background the second command with Bash `run_in_background: true`; its completion notification re-invokes the session. In Codex, start it with `exec_command` and a short `yield_time_ms`, then poll the returned `session_id` with `write_stdin` while keeping the turn active. Resume a yielded `functions.exec` cell with `functions.wait`. A yield leaves the process running; do not start a duplicate. Use `--timeout 90` for polling waits and follow [host integration](references/hosts.md).
+In Claude Code, run the second command with Bash `run_in_background: true` and `timeout: 7200000`, then end the turn. It sleeps until a message is addressed to you. Never run it in the foreground. In Codex, do not run `wait` at all: end the turn. A typed wake-up or the user brings the session back. Details: [host integration](references/hosts.md).
 
-`.partner/<id>/lastseen` is the proof it is running — the stamp refreshes every few seconds while `wait` polls. Missing or minutes old means this session is deaf, whatever the roster claims.
+**Keep exactly one `wait` in flight.** Two split the inbox — each message is returned to whichever polls first. A duplicate idles instead of consuming and says so, and `read` states whether a wait is already in flight for you.
 
-**A `wait` that returns early or empty is never a reason to stop.** Distinguish a yielded tool call from a completed process: poll the existing tool session after a yield, and start a new wait only after the process exits. An actual empty timeout is normal. Every briefing states the rule for whatever CLI the agent is running, plus that CLI's specific cap when one is known (`references/providers.md`); either way, run `wait` again.
+**Nothing is delivered once and forgotten.** `read` and `wait` check the transcript for anything addressed to an agent and still unanswered, not only what its cursor has not seen. What clears a debt is a reply to that sender (or one to `@all`); `pending` shows what is owed and to whom. `send --final` closes a thread: the message needs no reply and wakes nobody.
 
-**Nothing is delivered once and forgotten.** `wait` checks the transcript for anything addressed to an agent and still unanswered, not only what its cursor has not seen — so a message dropped by a killed `wait` or by a turn that ended without replying comes back marked *re-delivered* instead of needing another agent to notice. What clears a debt is a reply to that sender (or one to `@all`); `pending` shows what is owed and to whom.
+### How the push model works
 
-**Keep exactly one `wait` in flight.** Two split the inbox — each message is returned to whichever polls first, and one whose output is never read is a message never answered. A duplicate now idles instead of consuming and says so, ownership transfers if the owner dies, and `read` states whether a wait is already in flight for you. Check that line before arming another.
+```
+ message in chat.md ──▶ waker (one process, checks every 1 s, 0 tokens)
+                          ├─ addressee owes a reply, turn ended, tab typable ─▶ type a wake-up
+                          ├─ addressee mid-turn ─▶ do nothing: the hooks deliver it
+                          └─ addressee is Claude ─▶ its own background `wait` returns
+```
 
-### When every partner has finished
-
-Every idle `wait` cycle is a model turn spent deciding to wait again. So once **every running agent has finished its work** and **a minute has passed with no new work**, the session **pauses**. If even one agent is still working, everybody keeps looping.
-
-"Finished" is proven per agent, never assumed from silence. `wait` only pauses the session when all of these hold for every agent:
-
-- it is in `wait`. **Going back to `wait` is how an agent says it is done**, and every briefing says so: do not run it while work is still open;
-- it owes nobody a reply (`pending` is empty);
-- it is not mid-turn. For this session, a prompt hook opens the turn and the Stop hook closes it, because the background `wait` keeps running while you work;
-- it has stayed like that for the full minute since `wait` last handed it anything.
-
-A tab in a terminal that cannot be typed into does not hold the pause off. Looping it until the human returns would cost a model turn every cycle, so it stops like everyone else. The pause notice names it, and when there is work the human types `continue` in its tab. When you resume the session, the resume note names that tab and the line to type: relay it to the human.
+A **busy** agent is never typed into. The hooks reach it instead: `UserPromptSubmit` opens its turn and adds new messages to the prompt, `PostToolUse` adds anything that arrives mid-turn after each tool call, and `Stop` closes the turn — unless a reply is owed. The open turn is what tells the waker to leave that tab alone.
 
 So **before ending a turn, finish everything**: answer every message to you, complete and report the change, and check what you said you would check. Ending the turn is your declaration that you are done.
 
-While paused:
-
-- **Every agent ends its turn, this session included.** Its `wait` returns saying the session is paused. Do not arm another; end the turn, and the Stop hook lets it go. The resume types a wake-up into this session's tab, as it does for the partners.
-- **The exception:** if `wait` says it is *sleeping*, this session's tab cannot be typed into (it is not running in a terminal like Orca). Then keep that one background `wait` armed. It does not return while paused, so it costs nothing.
-- `state`, `list` and `read` all say the session is paused. Paused partners are **idle, not gone**: they still count as present for the debate protocol.
-
-**Resuming takes no step at all.** The first message to any agent wakes everyone and types a wake-up into every tab: your `send` or `claim`, a partner's, the user writing to this session (the prompt hook catches that), or `kickoff` / `spawn`. When the user brings a new question, run the protocol as usual.
+**Advisors must not ping-pong.** Every reply between two advisors is a new debt, and every debt wakes its agent. After 8 advisor messages in a row without the baton holder, further ones create no debt and wake nobody until the holder speaks again. `read` and `wait` say when that limit is reached.
 
 ```bash
-python "$P" idle                  # who is still working, and why the loops have or have not paused
-python "$P" idle --after 300      # require 5 min instead of 1; --after 0 = never pause
+python "$P" idle                  # what every agent is doing, and how a message reaches it
 ```
 
 ### When a partner goes quiet
 
-A tab agent whose CLI ended its turn is unreachable — nothing re-invokes it, and an enabled Stop hook is available in Claude Code and Codex. Other hosts rely on the loop and wake-ups. `read`, `wait` and `send` name any agent with no `wait` in flight, and the fix is to type into its tab:
+A partner that owes a reply and has ended its turn is woken automatically. `read`, `wait` and `send` name any agent that **cannot be reached** — no `wait` in flight and a tab that cannot be typed into. The fix is for the user to type `continue` in its tab, or to restart it:
 
 ```bash
-python "$P" nudge [--id p2]        # one, or everyone who stopped listening
+python "$P" nudge [--id p2]        # one agent, or every idle agent that owes a reply
 ```
 
-`send` does it automatically for a recipient that is not listening, so a message to a stalled partner wakes it instead of vanishing. How to type into a tab comes from the same terminal entry that opened it, so a terminal described by the user is woken like a built-in; one that cannot be typed into says so and `nudge` prints the command that restarts the agent, which is what to relay. Wake-ups never move the baton. After three wake-ups an agent ignores, its CLI has exited: the typing stops, a system message says so, and `restart --id <id>` relaunches it. `references/terminals.md`.
+How to type into a tab comes from the same terminal entry that opened it, so a terminal described by the user is woken like a built-in; one that cannot be typed into says so and `nudge` prints the command that restarts the agent, which is what to relay. Wake-ups never move the baton. After three wake-ups an agent ignores, its CLI has exited: the typing stops, a system message says so, and `restart --id <id>` relaunches it. `references/terminals.md`.
 
 ## The debate protocol
 
-Once a partner is running, consult it on **every question and every decision** — that is the point of having one. Check `python "$P" state` at the start of a turn; if any partner is live or **paused**, do not answer the user directly. Your first `send` wakes the paused ones.
+Once a partner is running, consult it on **every question and every decision** — that is the point of having one. Check `python "$P" state` at the start of a turn; if any partner is live or **idle**, do not answer the user directly. Your first `send` wakes the idle ones.
 
-There are two roles and the **baton** decides which is yours: the holder acts, everyone else advises. Any agent can hold it, in any order, and it moves with the user's attention — read the holder off every `wait`/`read` and switch roles when it changes.
+There are two roles and the **baton** decides which is yours: the holder acts, everyone else advises. Any agent can hold it, in any order, and it moves with the user's attention — read the holder off every `read` and switch roles when it changes.
 
 **Holding the baton:** **claim** it, **state your own position** first, **put it to the group** with `send --to @all --wait`, **check their objections against the code** rather than conceding or dismissing, **rebut or converge** in two or three exchanges, then **act and report the argument** — not a summary that hides it. Deadlocks are a result, not a failure: hand a genuine judgement call back to the user with both positions stated fairly.
 
 **Not holding it:** advise whoever does, and debate the other advisors directly — `send --to p3`, not only `@all`. Several agents settling a question among themselves and handing the holder one recommendation is the design. Never `claim` or edit; only the user moves the baton.
 
-This session, when it is not the holder, joins through one `wait` using the host's asynchronous shell mechanism — Claude background tasks or Codex yielded-process polling — which keeps it in the debate while the user works in a partner's tab. `references/debate.md` has the mechanics.
+This session, when it is not the holder, stays in the debate while the user works in a partner's tab: in Claude Code through one background `wait`, in Codex through a typed wake-up when its tab can be typed into. `references/debate.md` has the mechanics.
 
 Skip the loop only for mechanical lookups. Anything involving a design choice, a trade-off, a code change, or an unclear cause goes to the partners.
 
@@ -289,15 +282,15 @@ python "$P" spawn --provider X [--model M] [--effort low|medium|high|max]
                   [--me-provider X --me-model M --me-effort E]   # describes YOU
                   [--fresh]                 # archive the old session first
 python "$P" kickoff [--text "..."] [--wait 240]   # open the session; no --text = orientation
-python "$P" send --to @all --text "..." [--wait 240]   # --from defaults to you
+python "$P" send --to @all --text "..." [--wait 240] [--final]   # --final: no reply needed
 python "$P" read [--peek]                   # new messages; --peek keeps the cursor
-python "$P" wait [--for id] [--timeout 90]  # block until addressed; partners use this
-python "$P" nudge [--id p2 | --all]         # wake agents that stopped looping
+python "$P" wait [--for id] [--timeout 7000]  # Claude only, in the background: block until addressed
+python "$P" nudge [--id p2 | --all]         # wake agents by typing into their tabs
 python "$P" restart --id p2                 # relaunch an agent whose CLI exited
 python "$P" unwait                          # stop your own wait -- never kill by pattern
 python "$P" pending                         # messages you still owe a reply to
-python "$P" idle [--after N]                # who is still working; --after sets the finished-for time (0 = never pause)
-python "$P" hook-stop | hook-prompt          # internal: the Stop and UserPromptSubmit hooks
+python "$P" idle                            # what every agent is doing, and how a message reaches it
+python "$P" hook-stop | hook-prompt | hook-post-tool   # internal: the plugin hooks
 python "$P" claim [--force]                 # user just told YOU to act: take the baton
 python "$P" init --me-provider X --me-model M [--me-effort E] [--me-auto A]
                                             # rarely needed; spawn does this
@@ -309,7 +302,7 @@ Add `--json` to any command for machine-readable output.
 
 State lives in `.partner/` at the repo root — `chat.md` is the full transcript, readable at any time. `init` adds `.partner/` to `.git/info/exclude`, so it is ignored locally without touching a tracked `.gitignore`.
 
-A `UserPromptSubmit` hook opens this session's turn (so nobody pauses while it works) and wakes a paused session when the user writes. A `Stop` hook (`hooks/hooks.json`) closes the turn, and stops any agent — this session included — from ending a turn while a message to it or `@all` sits unanswered in `chat.md`; it points them at `read`/`send` first. The baton holder is exempt, own messages do not count, a paused tab agent is let go, and it fails open. `references/protocol.md` covers it.
+A `UserPromptSubmit` hook opens every agent's turn and adds new messages to the prompt. A `PostToolUse` hook adds messages that arrive mid-turn. A `Stop` hook (`hooks/hooks.json`) closes the turn, and stops any agent — this session included — from ending a turn while a message to it or `@all` sits unanswered in `chat.md`; it points them at `read`/`send` first. It also holds a Claude agent that has no background `wait` armed. The baton holder is exempt from owed replies, own messages and `--final` messages do not count, and every hook fails open. `references/protocol.md` covers it.
 
 ## Deeper reference
 

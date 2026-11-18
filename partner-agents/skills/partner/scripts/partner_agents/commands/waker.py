@@ -1,7 +1,13 @@
 """The waker: one detached process per session that types wake-ups for others.
 
-See partner_agents/waker.py for why it exists. `partner.py waker` is started by
-`ensure_waker`, never by hand; it exits on its own once the session is over.
+It watches chat.md, and whenever a message leaves an idle agent owing a reply,
+it types a wake-up into that agent's tab (waking.wake_owed). That is what lets
+every agent end its turn instead of polling: the waker polls a file, which
+costs nothing, so no model has to. It also performs wake-ups that a sandboxed
+agent could not type itself -- see partner_agents/waker.py.
+
+`partner.py waker` is started by `ensure_waker`, never by hand; it exits on its
+own once the session is over.
 """
 from __future__ import annotations
 
@@ -16,9 +22,10 @@ from ..presence import is_listening
 from ..state import load_roster, state_dir
 from ..terminals.detect import load_terminals, terminal_bin
 from ..terminals.tabs import term_argv
-from ..timing import WAKE_REQUEST_TTL, WAKER_IDLE_EXIT, WAKER_POLL
+from ..timing import WAKE_RECHECK, WAKE_REQUEST_TTL, WAKER_IDLE_EXIT, WAKER_POLL
 from ..waker import waker_alive
-from ..waking import nudge_agent
+from .. import waking
+from ..waking import nudge_agent, wake_owed
 
 
 def can_drive(roster: dict) -> bool:
@@ -77,12 +84,19 @@ def cmd_waker(args) -> int:
     token = f"{os.getpid()}-{time.time():.3f}"
     _beat(sd, token)
     time.sleep(WAKER_POLL)
+    seen_chat, seen_roster, next_check = None, None, 0.0
     while _owner(sd) == token:   # two started at once: the last writer keeps it
         _beat(sd, token)
         try:
             roster = load_roster(sd)
+            mtime = (sd / "roster.json").stat().st_mtime
         except (OSError, ValueError):
             return 0
+        if mtime != seen_roster:
+            # A tab recorded since the last look (adopt_own_tab, spawn) changes
+            # whether that agent can be typed into; the answer is cached.
+            waking._TYPABLE.clear()
+            seen_roster = mtime
         running = [p for p, e in roster.get("partners", {}).items()
                    if e.get("status") == "running"]
         if not running or time.time() - last_activity(sd, roster) > WAKER_IDLE_EXIT:
@@ -100,6 +114,16 @@ def cmd_waker(args) -> int:
                 continue         # it came back on its own meanwhile
             nudge_agent(sd, roster, pid, str(data.get("why") or ""),
                         throttle=0, relay=False)
+        # A new message, a turn that just ended, or a wake-up nobody acted on:
+        # re-checked on every change to chat.md, and every WAKE_RECHECK anyway.
+        try:
+            st = (sd / "chat.md").stat()
+            chat = (st.st_size, st.st_mtime)
+        except OSError:
+            chat = None
+        if chat != seen_chat or time.time() >= next_check:
+            seen_chat, next_check = chat, time.time() + WAKE_RECHECK
+            wake_owed(sd, roster, relay=False)
         time.sleep(WAKER_POLL)
     if _owner(sd) == token:
         try:

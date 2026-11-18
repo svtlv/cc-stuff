@@ -8,10 +8,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .prompts import EFFORT_HINT, LOOP_SESSION, LOOP_TAB, SEED
+from .prompts import (
+    EFFORT_HINT, LISTEN_BACKGROUND, LISTEN_TYPED, LOOP_SESSION, LOOP_TAB, SEED,
+)
 from .providers.resolve import provider_spec, wait_note
 from .state import baton_of, repo_snapshot, write_wrappers
-from .timing import WAIT_TIMEOUT
+from .timing import BACKGROUND_TOOL_TIMEOUT_MS, BACKGROUND_WAIT, HOP_LIMIT
 from .transcript import render, tail_msgs
 from .util import NL
 
@@ -33,8 +35,8 @@ def boot_prompt(seed_f: Path, holder: str) -> str:
             f"instruction. Do not run `claim`; the write baton belongs to "
             f"{holder} until the human types something new in this tab.] "
             f"Read {seed_f} and follow it exactly. It explains who you are, "
-            f"who you are working with, and how to talk to them. Begin now by "
-            f"entering the wait loop it describes.")
+            f"who you are working with, and how to talk to them. Begin now with "
+            f"step 1 of the loop it describes.")
 
 
 def build_seed(pid: str, roster: dict, root: Path, sd: Path,
@@ -52,49 +54,45 @@ def build_seed(pid: str, roster: dict, root: Path, sd: Path,
                if has_handoff else
                f"{NL}Nothing has been decided yet.{NL}")
     run = write_wrappers(sd, script, pid)
-    # Each CLI caps command runtime differently, and a capped `wait` returning
-    # early is the most common reason an agent talks itself out of the loop --
-    # so the cap its own CLI imposes goes in its own briefing.
-    codex = p.get("provider") == "codex"
-    host_name = "Codex" if codex else p.get("provider") or "the host"
-    wait_instruction = (
-        "Start `wait` with exec_command and a short yield_time_ms. If it yields "
-        "a session_id, poll that same process with write_stdin until it exits. "
-        "A yield is not a timeout or completion. Keep the turn active while "
-        "listening; do not assume a running process will re-invoke the model "
-        "after a final answer. If the host provides completion notifications, "
-        "use its documented background-task mechanism instead."
-        if codex else
-        "Run `wait` as a BACKGROUND shell command (Claude Code Bash with "
-        "run_in_background: true). The task notification re-invokes the "
-        "session when it returns. Never block the harness in the foreground.")
-    listen_step = (
-        f"start one `{run} wait --timeout 90` and poll its tool session until "
-        "completion, keeping this turn active."
-        if codex else
-        f"start one `{run} wait --timeout 600` as a background command, "
-        "then end the turn.")
+    # Only Claude's harness re-invokes the model when a background command
+    # returns, so only Claude listens through a `wait` -- see listen_mode. The
+    # briefing is written before the tab opens, so it goes by provider alone;
+    # whether a non-Claude tab can really be typed into, `read` reports later.
+    provider = p.get("provider") or ""
+    claude = provider == "claude"
+    host_name = {"codex": "Codex", "claude": "Claude Code"}.get(provider,
+                                                               provider or "the host")
+    if claude:
+        note = wait_note(provider)
+        listen_rule = LISTEN_BACKGROUND.format(
+            run=run, wait_timeout=BACKGROUND_WAIT,
+            tool_timeout=BACKGROUND_TOOL_TIMEOUT_MS,
+            wait_note=f"{NL * 2}{note}" if note else "")
+        listen_step = ("make sure one background `wait` is armed (`read` says "
+                       "whether one is in flight; arm it if not), then end your "
+                       "turn.")
+        stop_wait = ", and while no background `wait` is armed for you"
+    else:
+        listen_rule = LISTEN_TYPED
+        listen_step = "end your turn. The next message or the human wakes you."
+        stop_wait = ""
     loop = (LOOP_SESSION if kind == "session" else LOOP_TAB).format(
-        run=run, wait_note=wait_note(p.get("provider") or ""),
-        host_name=host_name, wait_instruction=wait_instruction,
-        listen_step=listen_step)
+        run=run, host_name=host_name, listen_rule=listen_rule,
+        listen_step=listen_step, stop_wait=stop_wait, hop_limit=HOP_LIMIT)
     human_input = ("They type into your terminal tab."
                    if kind == "tab" else
                    f"They reach you through your own {host_name} harness, not a "
                    "terminal tab -- and they may instead be typing in another "
-                   "agent's tab, which is why your loop keeps a background `wait`.")
-    if kind == "tab":
+                   "agent's tab.")
+    if kind == "tab" or not claude:
         start = "Now run step 1."
-    elif codex:
-        start = ("Run step 1 (`read`) now, then step 4 -- start the wait and poll "
-                 "its tool session while keeping the turn active.")
     else:
         start = ("Run step 1 (`read`) now, then step 4 -- arm the background "
                  "`wait` and end your turn. You will be re-invoked when the "
                  "human or a partner needs you.")
     return SEED.format(
         id=pid, cwd=root, peers=peers, chat=sd / "chat.md", run=run,
-        timeout=WAIT_TIMEOUT, baton=baton_of(roster),
+        baton=baton_of(roster),
         other=", ".join(others) or "the others",
         example_peer=others[0] if others else "p2",
         effort=effort, handoff=handoff, loop=loop,

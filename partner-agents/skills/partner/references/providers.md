@@ -81,7 +81,7 @@ A partner sits in its own tab. A permission prompt there is easy to miss and sil
 | `auto` *(default)* | `--permission-mode auto` | `--approve-for-me` | `--approval-mode yolo` | its `edits` flag, never its bypass flag |
 | `full` | `--permission-mode bypassPermissions` | `--dangerously-bypass-approvals-and-sandbox` | `--approval-mode yolo` | its bypass flag, if it has one |
 
-`auto` is the working default: the CLI's own reviewer approves each edit and command, so nothing waits on a human. `edits` is not enough on its own — Claude still asks before every shell command, including the partner's own `wait` loop, and the partner sits at a prompt in a tab nobody is watching. Gemini has no reviewer, so its `auto` is its no-prompt mode. `full` skips every check and removes the sandbox — reasonable inside a container or a throwaway clone, not on a machine you care about.
+`auto` is the working default: the CLI's own reviewer approves each edit and command, so nothing waits on a human. `edits` is not enough on its own — Claude still asks before every shell command, including the partner's own `read` and `send`, and the partner sits at a prompt in a tab nobody is watching. Gemini has no reviewer, so its `auto` is its no-prompt mode. `full` skips every check and removes the sandbox — reasonable inside a container or a throwaway clone, not on a machine you care about.
 
 **This is why the baton is a convention rather than a sandbox.** At `edits`, `auto` or `full` every partner is technically able to write. The baton is enforced by every agent's briefing telling it to check `list` first, not by a flag. For hard enforcement, spawn with `--auto ask` — the CLI will then stop and ask before it writes anything.
 
@@ -194,38 +194,33 @@ Describe it once in `~/.claude/partner-providers.json` (or `.partner/providers.j
     "efforts": ["low", "medium", "high"],
     "install": "pipx install aider-chat",
     "note": "terse, diff-focused; good at spotting an over-broad change",
-    "wait_note": "kills any command after 30s -- pass --timeout 600 to `wait`, and re-run it if it still returns empty"
+    "wait_note": "background commands are capped at 1 hour -- pass --timeout 3500 to `wait`"
   }
 }
 ```
 
 It then appears in `providers`, validates against its own `efforts`, and spawns as `--provider aider` with no template on the command line. Same substitution code as `--cmd`, so there is one template language, not two.
 
-`wait_note` is optional and exists so a cap this plugin has never measured still reaches that CLI's partners: whatever it says replaces the generic wait guidance in every briefing for that provider. Leave it out and the generic rule applies, which is already correct — just one round slower to learn.
+`wait_note` is optional. It is appended to the background-`wait` rule, which only an agent whose harness re-invokes the model on a finished background command follows — today that is Claude. Every other CLI is briefed not to run `wait` at all, so the note does not reach it.
 
 The file is optional in every sense — it exists so a CLI used often does not have to be retyped.
 
 ### What a partner CLI must be able to do
 
-Run shell commands. That is how it calls `wait` and `send`. A CLI that cannot run commands can read the transcript but cannot take part in the debate.
+Run shell commands. That is how it calls `read` and `send`. A CLI that cannot run commands can read the transcript but cannot take part in the debate.
 
 ## Command-runtime caps
 
-Long-running waits need the host's shell execution protocol. A yielded Codex process stays alive and must be polled; a process that actually timed out may need restarting. Read [host integration](hosts.md) and the active tool documentation before deciding which occurred.
+Only a Claude agent runs `wait`, and only as a background command: `wait --timeout 7000` with Bash `timeout: 7200000`. The background cap is 2 hours, and the foreground cap (120s by default, 600s max) does not apply. Without an explicit tool timeout the default of 30 minutes kills the wait early, which costs a turn.
 
-Keep one wait per participant. After a completed empty timeout, listen again. After a tool yield, continue that existing process. The provider's `wait_note` carries the relevant instructions; custom providers can supply their own note.
+Every other CLI does not run `wait`. It ends its turn and is woken by a line typed into its tab, so no command cap matters for it.
 
-| Where the CLI comes from | Where its note comes from |
-|--------------------------|---------------------------|
-| a built-in recipe | the recipe's `wait_note` (Claude background tasks or Codex yielded-process polling) |
-| `~/.claude/partner-providers.json` or `.partner/providers.json` | that entry's `wait_note` — how a cap this plugin has never seen still reaches the briefing |
-| a probed CLI, or `--provider custom --cmd` | the generic rule |
+| Where the CLI comes from | How it listens |
+|--------------------------|----------------|
+| `claude` | one background `wait`; the recipe's `wait_note` states the cap |
+| any other built-in, user-described or probed CLI | no `wait`; the waker types a wake-up into its tab |
 
-Read the active execution tool documentation for yield and timeout behavior. Use a custom `wait_note` when a provider requires different handling.
-
-`wait`'s own default is 90s for the same reason: at 120s it sat exactly on one known cap, turning every normal wait into a tool error.
-
-A stopped turn can also leave an agent unreachable. Claude Code and Codex can load the shared `Stop` hook; Codex requires the installed hook definition to be trusted. Follow [host integration](hosts.md). When hooks are unavailable, maintain the wait loop explicitly and recover with a nudge typed into the tab. A Codex tool yield is not a killed wait: poll its existing tool session before starting another.
+A stopped turn leaves a Claude agent unreachable only when no background `wait` is armed; the `Stop` hook prevents that. Any other agent is unreachable only when its tab cannot be typed into: then the user types `continue` there, or `restart --id <id>` relaunches it.
 
 ## Adding a recipe
 

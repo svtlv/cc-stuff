@@ -10,22 +10,41 @@ not have an equivalent, and this plugin cannot require one -- so the recovery
 comes from outside the agent entirely: type into its tab, exactly as the human
 would. That works whatever is running in it. Every terminal with a control CLI
 can do it, and `spawn` records which one owns each tab.
+
+Nothing polls. An agent with nothing owed ends its turn and costs nothing until
+input arrives: the human typing in its tab, or a message in chat.md that it
+owes a reply to. How that message reaches it depends on its listen mode:
+
+  background  Claude: one background `wait` that returns only for a message;
+              the harness's task notification re-invokes the model.
+  typed       any other CLI in a tab that can be typed into: the waker types a
+              wake-up line once the agent's turn has ended.
+  manual      neither: only the human brings it back, by typing in its tab.
+
+An agent that is mid-turn is never typed into. The hooks reach it instead: the
+PostToolUse hook shows new messages at its next tool call, and the Stop hook
+does not let the turn end while a reply is owed.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 
 from .presence import is_listening, last_seen, turn_open
-from .state import baton_of, is_bound_session, read_pause, save_roster
+from .state import baton_of, is_bound_session, save_roster
 from .terminals.detect import (
     load_terminals, own_tab, terminal_available, terminal_bin, terminal_order,
 )
 from .terminals.tabs import term_argv
-from .timing import NUDGE_WINDOW, UNANSWERED_NUDGES, WAKE_REQUEST_TTL
-from .transcript import append_msg
+from .timing import (
+    BACKGROUND_TOOL_TIMEOUT_MS, BACKGROUND_WAIT, NUDGE_WINDOW, UNANSWERED_NUDGES,
+    WAKE_REQUEST_TTL,
+)
+from .transcript import append_msg, pending_for
 from .util import NL, age_seconds, dig_json, nag_throttled
 from .waker import ensure_waker, request_wake, waker_alive
 
@@ -42,19 +61,20 @@ def silence_notice(sd: Path, roster: dict, who: str, wake: bool = False) -> str:
         return ""
     if wake:
         res = [nudge_agent(sd, roster, p,
-                           "you stopped looping -- nobody is listening for you.")
+                           "you stopped listening -- nobody can reach you.")
                for p in silent]
         woke = [r["id"] for r in res if r["nudged"]]
         gone = [r["why"] for r in res if r.get("gone")]
         out = "".join(f"{NL * 2}[{g}]" for g in gone)
         if woke:
-            out += (f"{NL * 2}[{', '.join(woke)} had stopped listening; a wake-up "
+            out += (f"{NL * 2}[{', '.join(woke)} could not be reached; a wake-up "
                     f"was typed into their tabs.]")
         if out:
             return out
     verb = "is" if len(silent) == 1 else "are"
-    return (f"{NL * 2}[{', '.join(silent)} {verb} not listening -- no `wait` is "
-            f"in flight. `nudge --id <id>` types a wake-up into the tab.]")
+    return (f"{NL * 2}[{', '.join(silent)} {verb} not reachable -- no `wait` is "
+            f"in flight and the tab cannot be typed into. The human must type "
+            f"`continue` there, or `restart --id <id>` brings it back.]")
 
 
 def find_handle(spec: dict, title: str) -> str:
@@ -95,9 +115,8 @@ def adopt_own_tab(sd: Path, roster: dict, who: str) -> None:
     """Record the tab the calling agent runs in, if its terminal says.
 
     `spawn` records this for every tab it opens. The agent that ran `init` was
-    never spawned, so without this it had no tab on record: it could not be
-    woken by typing, and had to keep a `wait` alive through every pause while
-    the others stopped. Called from that agent's own commands, so the handle is
+    never spawned, so without this it had no tab on record and could not be
+    woken by typing. Called from that agent's own commands, so the handle is
     always the terminal it is in right now -- a resumed session in a new tab
     corrects the record the first time it waits.
     """
@@ -123,8 +142,8 @@ def adopt_own_tab(sd: Path, roster: dict, who: str) -> None:
 def typable(roster: dict, pid: str) -> bool:
     """Can a wake-up be typed into this agent's tab from outside?
 
-    Cached per process: resolving a terminal may probe it, and a session that
-    cannot pause re-asks this every IDLE_CHECK.
+    Cached per process: resolving a terminal may probe it, and the waker asks
+    this for every agent on every check.
     """
     if pid not in _TYPABLE:
         entry = (roster.get("partners") or {}).get(pid) or {}
@@ -132,19 +151,23 @@ def typable(roster: dict, pid: str) -> bool:
     return _TYPABLE[pid]
 
 
-def sleeps_through_pause(roster: dict, pid: str) -> bool:
-    """Does this agent keep a sleeping `wait` through a pause instead of stopping?
+def listen_mode(roster: dict, pid: str) -> str:
+    """How this agent hears a message while its turn is over -- see the module doc.
 
-    Every agent stops on a pause and is woken by typing into its tab. The one
-    exception is an agent nobody can type into whose `wait` is a background
-    process of its own harness -- the session agent outside a terminal like
-    Orca. Its `wait` can sleep for free, and it is the only way that agent
-    hears a resume that starts elsewhere. A tab agent cannot do the same: its
-    `wait` is a foreground command the CLI kills at its cap, and every re-arm
-    is a model turn.
+    Claude always listens through a background `wait`: its harness re-invokes
+    the model when a background command returns, which no other CLI does, and
+    that needs no typing into a tab -- so it is never typed into mid-thought.
     """
     entry = (roster.get("partners") or {}).get(pid) or {}
-    return (entry.get("kind") or "tab") == "session" and not typable(roster, pid)
+    if entry.get("provider") == "claude":
+        return "background"
+    return "typed" if typable(roster, pid) else "manual"
+
+
+def reachable(sd: Path, roster: dict, pid: str) -> bool:
+    """Will a message addressed to this agent reach it without the human?"""
+    return (is_listening(sd, roster, pid) or turn_open(sd, pid)
+            or typable(roster, pid))
 
 
 def nudge_command(entry: dict, pid: str, text: str) -> list[str] | None:
@@ -186,7 +209,7 @@ def nudge_command(entry: dict, pid: str, text: str) -> list[str] | None:
                      text=text, text_nl=text + NL)
 
 
-def nudge_text(pid: str, why: str) -> str:
+def nudge_text(pid: str, why: str, mode: str = "typed") -> str:
     """What gets typed into the tab.
 
     It arrives in the agent's prompt exactly as if the human had typed it, so
@@ -197,10 +220,14 @@ def nudge_text(pid: str, why: str) -> str:
     """
     rel = f".partner/{pid}"
     run = rel.replace("/", "\\") + "\\p.cmd" if os.name == "nt" else rel + "/p.sh"
+    after = (f"then arm one background `{run} wait --timeout {BACKGROUND_WAIT}` "
+             f"(tool timeout {BACKGROUND_TOOL_TIMEOUT_MS}) and end your turn."
+             if mode == "background" else
+             "then end your turn -- the next message wakes you again.")
     return (f"continue -- automated wake-up from the partner transcript, NOT "
             f"the human: {why} Do NOT claim the baton; nobody has given you an "
             f"instruction. Run `{run} read`, answer what it shows with "
-            f"`{run} send`, then go back to `{run} wait` and keep looping.")
+            f"`{run} send`, {after}")
 
 
 def unanswered(sd: Path, pid: str) -> int:
@@ -266,7 +293,7 @@ def nudge_agent(sd: Path, roster: dict, pid: str, why: str,
         # Somebody already woke it inside the window: handled, not a failure.
         return {"id": pid, "nudged": False, "throttled": True,
                 "why": "nudged moments ago"}
-    argv = nudge_command(entry, pid, nudge_text(pid, why))
+    argv = nudge_command(entry, pid, nudge_text(pid, why, listen_mode(roster, pid)))
     if not argv:
         manual = entry.get("runner") or f"{sd / pid}/run.sh"
         where = entry.get("tab") or "its window"
@@ -314,29 +341,20 @@ def _send(argv: list[str]) -> str:
 
 def silent_agents(sd: Path, roster: dict, who: str,
                   targets: list[str] | None = None) -> list[str]:
-    """Running tab agents that nothing is listening on behalf of.
+    """Running agents that a message cannot reach without the human.
 
-    `is_listening` answers "a `wait` is in flight right now", which is the only
-    question that matters here -- an agent that just replied and then stopped
-    looks busy by every other measure, and is exactly the one about to miss the
-    next message.
+    An agent that ended its turn is not silent by itself any more -- that is
+    how every agent idles. It is silent when nothing can bring it back: no
+    `wait` in flight, no turn open for the hooks to reach, and a tab that
+    cannot be typed into.
     """
     out = []
-    if read_pause(sd):
-        # Not listening on purpose. Waking them is what lifting the pause does;
-        # waking them one at a time would just undo the pause for nothing.
-        return out
     for pid, entry in (roster.get("partners") or {}).items():
         if pid == who or entry.get("status") != "running":
             continue
-        if (entry.get("kind") or "tab") == "session" and (
-                turn_open(sd, pid) or not typable(roster, pid)):
-            # Mid-turn with the human, its background `wait` may be between
-            # runs; and with no tab on record, its Stop hook is all there is.
-            continue
         if targets is not None and pid not in targets:
             continue
-        if is_listening(sd, roster, pid):
+        if reachable(sd, roster, pid):
             continue
         age = age_seconds(last_seen(sd, pid))
         # Give a newly spawned agent time to reach its first `wait` before
@@ -345,3 +363,63 @@ def silent_agents(sd: Path, roster: dict, who: str,
             continue
         out.append(pid)
     return out
+
+
+def _wake_state(sd: Path, pid: str) -> dict:
+    try:
+        return json.loads((sd / pid / ".woke").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def wake_owed(sd: Path, roster: dict, targets: list[str] | None = None,
+              why: str = "a message in the transcript is waiting for your reply.",
+              relay: bool = True) -> dict:
+    """Type a wake-up into every idle agent that owes a reply. The one path.
+
+    Run by the waker on every change to chat.md, and by `send` itself when no
+    waker is alive. Idempotent through <id>/.woke, which records the newest
+    owed message the agent was woken for: it is woken again for a newer
+    message, or after NUDGE_WINDOW if it never acted on the last wake-up --
+    never twice for the same message it already reacted to.
+    """
+    woke, failed = [], []
+    now = time.time()
+    for pid, entry in (roster.get("partners") or {}).items():
+        if entry.get("status") != "running":
+            continue
+        if targets is not None and pid not in targets:
+            continue
+        owed = pending_for(sd, roster, pid, holder_too=True)
+        if not owed:
+            continue
+        if is_listening(sd, roster, pid) or turn_open(sd, pid):
+            continue             # a wait or the hooks deliver it
+        age = age_seconds(entry.get("started"))
+        if age is not None and age < 30:
+            continue             # still booting; typing into it would garble that
+        if not typable(roster, pid):
+            continue             # manual: reported by silent_agents instead
+        # Timestamps have one-second resolution, so the newest owed message is
+        # told apart by its content and the size of the backlog as well.
+        last = owed[-1]
+        newest = hashlib.sha1(f"{len(owed)}|{last['ts']}|{last['from']}|"
+                              f"{last['body']}".encode("utf-8")).hexdigest()[:16]
+        st = _wake_state(sd, pid)
+        seen = last_seen(sd, pid)
+        if st.get("for") == newest and (
+                st.get("seen") != seen or now - float(st.get("at") or 0) < NUDGE_WINDOW):
+            continue             # woken for this already: it reacted, or give it time
+        r = nudge_agent(sd, roster, pid, why, throttle=0, relay=relay)
+        try:
+            (sd / pid).mkdir(parents=True, exist_ok=True)
+            (sd / pid / ".woke").write_text(json.dumps(
+                {"for": newest, "at": now, "seen": last_seen(sd, pid)}),
+                encoding="utf-8")
+        except OSError:
+            pass
+        if r["nudged"]:
+            woke.append(pid)
+        elif not r.get("throttled"):
+            failed.append(f"{pid} ({r['why']})")
+    return {"woke": woke, "failed": failed}

@@ -11,7 +11,6 @@ import os
 import sys
 from pathlib import Path
 
-from .timing import IDLE_PAUSE
 from .util import NL, clip_lines, run_git
 
 
@@ -84,7 +83,7 @@ def is_bound_session(entry: dict, sid: str | None = None,
     roster["self"] for *every* process in the repo without PARTNER_ID -- and
     the plugin's hooks fire in every enabled host session opened there. Without
     this check, an unrelated session typing a prompt counted as the human
-    writing to the session agent: it lifted the pause, was then told by the
+    writing to the session agent: it was told by the
     Stop hook to run `wait`, and that `wait` recorded the unrelated tab as the
     session agent's -- so later wake-ups were typed into it. `init` and
     `resume` record which session owns the entry; nothing else may act as it.
@@ -222,21 +221,6 @@ def cache_dir() -> Path:
     d = Path.home() / ".partner-cache"
     d.mkdir(parents=True, exist_ok=True)
     return d
-
-
-def pause_after(roster: dict) -> int:
-    """The idle threshold for this session; 0 means never pause."""
-    try:
-        return max(0, int(roster.get("idle_pause", IDLE_PAUSE)))
-    except (TypeError, ValueError):
-        return IDLE_PAUSE
-
-
-def read_pause(sd: Path) -> dict:
-    try:
-        return json.loads((sd / "paused.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
 
 
 # The entry script every wrapper, hook and briefing calls. Kept as the one
