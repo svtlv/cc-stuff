@@ -4,7 +4,7 @@ description: This skill should be used when the user runs "/autopilot" or "$auto
 argument-hint: "[task description | path to an existing plan file] [-- extra runner flags]"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, Skill, Agent, CronCreate, CronDelete
 metadata:
-  version: "0.5.0"
+  version: "0.6.0"
 ---
 
 # Autopilot
@@ -15,12 +15,13 @@ the plan, ask whether to build it, then build it under supervision.
 
 ```
  task ─► autopilot-plan ─► explain-summarize ─► implement? ─┬─► autopilot-run ─► report
-            (Q&A, drafts)     (plan report)                 └─► stop: plan kept
+       (Q&A, drafts, review)  (plan report)                 └─► stop: plan kept
  plan.md ─────────────────────────────────────────────────────► autopilot-run
 ```
-**Note:** this skill chains its sibling skills. A file path as the argument goes
-to the run skill, which checks the file and redesigns it first when the
-runner cannot use it.
+**Note:** this skill chains its sibling skills. Ralphex leads planning and
+its plan review; this chat watches it and relays its prompts. A file path as
+the argument goes to the run skill, which checks the file and redesigns it
+first when the runner cannot use it.
 
 ## Sibling Skills
 
@@ -93,13 +94,14 @@ in the workspaces folder ("Where the Run Works").
 
 ## Step 2 — Plan
 
-Follow `autopilot-plan` Steps 3–5 with the description. Relay every question
-and draft to the user in order, with a registered recommendation and its
-response time, then ask which review of the finished plan to run
-(external or same agent, Step 5 there). That question also has a
-recommended option and a response time, so planning never blocks on it.
-Planning ends with a `plan_file`, or with a rejected draft: then skip to
-Step 6 and report why it ended.
+Follow `autopilot-plan` Steps 3–5 with the description. Relay every
+question and draft to the user in order, with a registered recommendation
+and its response time. After the plan file exists, ralphex runs its own
+plan review and asks two more questions: which reviewer, then which
+findings to apply. Relay them the same way (`references/reviews.md`).
+They also have recommended answers and response times, so planning never
+blocks on them. Planning ends with a `plan_file`, or with a rejected
+draft: then skip to Step 6 and report why it ended.
 
 ## Step 3 — Explain the Plan
 

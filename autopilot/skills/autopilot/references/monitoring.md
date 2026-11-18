@@ -53,7 +53,7 @@ draft, 60 min for implement-or-stop, ...). Without a reply in that time,
 the recommendation is taken and the work continues to the end. Read
 `response-times.md` before the first question.
 
-**Runner prompts** (planner questions, draft review, prompts during a run)
+**Runner prompts** (planner questions, draft review, plan review, prompts during a run)
 are timed by the driver, so they fire even when the chat is idle:
 
 1. On a new `waiting` report, pick the recommended answer before asking:

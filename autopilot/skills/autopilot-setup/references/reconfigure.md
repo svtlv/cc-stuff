@@ -69,7 +69,7 @@ current value as the first option ("keep").
 | 10 | Classifier and key | Setup Stage 3. |
 | 11 | Response times | Setup Stage 4b (this repository's `.autopilot/config`, or the user's global file). |
 | 12 | Tool versions | Setup Stage 2. |
-| 13 | Plan review | `AP config-set .autopilot/config plan --section review --value auto\|off\|codex\|claude`; recommend `auto`. Autopilot always asks which review to run; this key only sets the recommended option, taken after `review_pick` (`plan_review.recommended` shows it now). With `auto`, an unusable other model downgrades the recommendation to the same agent. Show both CLIs' login/routing status. Honor manual skips (`../../autopilot/references/reviews.md`). |
+| 13 | Plan review | `AP config-set .autopilot/config plan --section review --value auto\|off\|codex\|claude`; recommend `auto`. Ralphex always asks which reviewer to use (External reviewer, Same agent, Skip review) and autopilot relays it; this key only sets the default answer, taken after `review_pick` (`plan_review.recommended` shows it now). With `auto`, Same agent replaces External reviewer when ralphex does not offer it (no usable external review tool, or the Codex executor). Show both CLIs' login/routing status and `cli.plan_review`. Honor manual skips (`../../autopilot/references/reviews.md`). |
 | 14 | Publish | `AP config-set .autopilot/config mode --section publish --value pr\|push\|off`; `draft = true\|false`. Check `gh auth status` (or `glab auth status`) for `pr`. |
 
 Write with `--comment` explaining each new value, as the first setup did.

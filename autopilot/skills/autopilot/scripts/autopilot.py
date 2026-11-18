@@ -9,7 +9,8 @@ reports progress as compact JSON.
 
 Commands:
   doctor [--json] [--latest]          tools, versions, configs, repo state
-  plan  --desc TEXT [-- ARGS]         start interactive plan creation
+  plan  --desc TEXT [-- ARGS]         start interactive plan creation (with its plan review)
+  plan-review PLAN [-- ARGS]          start the runner's review of an existing plan file
   run   --plan PATH [-- ARGS]         start plan execution with auto-restart
   wait  SESSION [--timeout S]         block until an event or a heartbeat
   answer SESSION ...                  answer the prompt the session waits on
@@ -106,8 +107,23 @@ PHASES = [
     (re.compile(r'^claude review|^review \d'), 'code review'),
     (re.compile(r'^codex iteration|^custom review|evaluating codex findings'), 'external review'),
     (re.compile(r'^plan iteration'), 'planning'),
+    (re.compile(r'^plan review round'), 'plan review'),
     (re.compile(r'finali[sz]e'), 'finalizing'),
 ]
+# the runner's own plan review (ralphex.windows v1.7.0-windows.4+): its stable prompt texts
+REVIEW_PICK_Q = 'Review the plan before implementation?'
+REVIEW_APPLY_Q = 'Which findings should be applied?'
+REVIEW_EXTERNAL, REVIEW_SAME, REVIEW_SKIP = 'External reviewer', 'Same agent', 'Skip review'
+REVIEW_ALL, REVIEW_NONE = 'All findings', 'None'
+PLAN_REVIEW_MIN = (1, 7, 0, 4)
+# "  2. MAJOR: Task 3 - text" under "plan review findings:" (the indent is gone after clean_line)
+REVIEW_FINDING_RE = re.compile(r'^(\d+)\.\s+(CRITICAL|MAJOR|MINOR):\s*(.*)$')
+# the review loop's outcome lines: posted to the chat as plan review updates
+REVIEW_LINE_RE = re.compile(
+    r'^(plan review skipped|plan review found no issues|no findings selected, plan left unchanged|'
+    r'applying selected findings to the plan|plan revised$|max plan review rounds|'
+    r'warning: .*(plan review|plan revision|review round|read-only guard|valid findings selection)|'
+    r'note: ralphex does not revert)')
 
 
 # ---------------------------------------------------------------- utilities
@@ -339,8 +355,8 @@ POLICY = {
     'plan_pick': (None, None, 'which plan to run when several exist'),
     'plan_check': (900, None, 'redesign a plan the runner cannot run well'),
     'plan_review': (1800, None, 'any changes to the finished plan (plan-only flow)'),
-    'review_pick': (600, None, 'review the finished plan: external, same agent, or none'),
-    'review_apply': (900, None, 'which plan review findings to apply'),
+    'review_pick': (600, None, "the runner's plan review: External reviewer, Same agent or Skip review"),
+    'review_apply': (900, None, "which of the runner's plan review findings to apply"),
 }
 
 
@@ -629,12 +645,14 @@ def autopilot_template():
              '# Layering: built-in defaults < ~/.config/autopilot/config (AUTOPILOT_CONFIG)',
              '# < this file < AUTOPILOT_TIMEOUTS. Comments must be on their own lines.',
              '', '[review]',
-             '# plan: the recommended review of a finished plan. autopilot always asks and takes',
-             '# this recommendation when review_pick passes without a reply.',
-             '#   auto  the other model (Codex in the Claude setup, Claude in the Codex setup);',
-             '#         the same agent when the other model is not usable',
-             '#   codex | claude  that CLI',
-             '#   off   recommend no review (the review is still offered)',
+             '# plan: the recommended answer to the runner\'s "Review the plan before',
+             '# implementation?". The runner always asks; autopilot takes this answer when',
+             '# review_pick passes without a reply.',
+             '#   auto  External reviewer (the runner\'s external review tool, Codex in the',
+             '#         Claude setup); Same agent when the runner does not offer it',
+             '#   codex | claude  the reviewer that runs that CLI (External reviewer is Codex,',
+             '#         Same agent is the executor)',
+             '#   off   recommend Skip review (the review is still offered)',
              '# plan = auto',
              '', '[publish]',
              '# mode: what happens to the run branch before the final report',
@@ -1286,36 +1304,53 @@ def codex_fallback_args(cli_args):
     return result + ['--codex', '--plan-model=:', '--task-model=:', '--review-model=:']
 
 
-def plan_review_pick(pref, reviewer, executor, other, usable):
-    """The options of the plan review question and the one to take when nobody answers.
+def plan_review_pick(pref, executor, offered, external_tool='codex', revised=0):
+    """The answer to the runner's "Review the plan before implementation?" when nobody replies.
 
-    The user is always asked; the recommendation only keeps an unattended flow moving. It is
-    the configured reviewer when usable, else the next usable one (the other model, then the
-    executor), so a missing CLI downgrades the review instead of dropping it.
+    The runner asks the question itself (External reviewer, Same agent, Skip review) and
+    autopilot relays it; this recommendation only keeps an unattended flow moving. `offered`
+    maps each reviewer option to (usable, reason). The configured reviewer comes first, then
+    the other one, so a missing reviewer downgrades the review instead of dropping it. After a
+    round that revised the plan, skip: one review round is enough without the user.
     """
-    options = [
-        {'option': 'external', 'reviewer': other, 'usable': usable[other][0],
-         'reason': usable[other][1]},
-        {'option': 'same', 'reviewer': executor, 'usable': usable[executor][0],
-         'reason': usable[executor][1]},
-        {'option': 'edit', 'reviewer': None, 'usable': True, 'reason': None},
-        {'option': 'none', 'reviewer': None, 'usable': True, 'reason': None},
-    ]
+    options = [{'option': name, 'usable': offered.get(name, (False,))[0],
+                'reason': offered.get(name, (False, None))[1]}
+               for name in (REVIEW_EXTERNAL, REVIEW_SAME)]
+    options.append({'option': REVIEW_SKIP, 'usable': True, 'reason': None})
+
+    def result(option, why):
+        return {'options': options, 'recommended': option, 'recommended_why': why}
+
+    if revised:
+        return result(REVIEW_SKIP, 'one review round already revised the plan')
     if pref == 'off':
-        return {'options': options, 'recommended': 'none',
-                'recommended_why': '[review] plan = off'}
-    order = [reviewer] if reviewer in usable else []
-    order += [r for r in (other, executor) if r not in order]
-    for name in order:
-        if usable[name][0]:
-            option = 'external' if name == other else 'same'
-            why = (f'{name} reviews plans here' if name == reviewer
-                   else f'{reviewer} is not usable ({usable[reviewer][1]}); {name} reviews instead'
-                   if reviewer in usable else f'{name} reviews instead')
-            return {'options': options, 'recommended': option, 'recommended_why': why}
-    return {'options': options, 'recommended': 'none',
-            'recommended_why': 'no reviewer is usable: ' + '; '.join(
-                f'{n}: {usable[n][1]}' for n in (other, executor))}
+        return result(REVIEW_SKIP, '[review] plan = off')
+    want = REVIEW_SAME if pref == executor else REVIEW_EXTERNAL
+    names = {REVIEW_EXTERNAL: f'the external review tool ({external_tool})',
+             REVIEW_SAME: f'the same agent ({executor}, read-only)'}
+    for option in (want, REVIEW_SAME if want == REVIEW_EXTERNAL else REVIEW_EXTERNAL):
+        ok, why = offered.get(option, (False, 'not offered'))
+        if ok:
+            if option == want:
+                return result(option, f'{names[option]} reviews plans here')
+            reason = offered.get(want, (False, 'not offered'))[1] or 'not offered'
+            return result(option, f'{want} is not usable ({reason}); {names[option]} reviews instead')
+    return result(REVIEW_SKIP, 'no reviewer is usable: ' + '; '.join(
+        f"{o['option']}: {o['reason']}" for o in options[:2]))
+
+
+def runner_version(text):
+    """(1, 7, 0, 4) from 'ralphex v1.7.0-windows.4'; None when the version is unknown."""
+    m = re.search(r'v?(\d+)\.(\d+)\.(\d+)(?:-windows\.(\d+))?', text or '')
+    return tuple(int(g or 0) for g in m.groups()) if m else None
+
+
+def runner_has_plan_review(cli):
+    """True when the runner reviews plans itself; None when its version cannot be read."""
+    if os.environ.get('AUTOPILOT_PLAN_REVIEW') in ('0', '1'):  # tests and unusual builds
+        return os.environ['AUTOPILOT_PLAN_REVIEW'] == '1'
+    version = runner_version(tool_info(cli)['version'] if cli else None)
+    return None if version is None else version >= PLAN_REVIEW_MIN
 
 
 def review_capability(repo, cfg=None):
@@ -1340,15 +1375,13 @@ def review_capability(repo, cfg=None):
     else:
         code = {'tool': 'none', 'usable': False, 'reason': 'external review is off'}
     pref = autopilot_config('review').get('plan', 'auto')
-    other = 'codex' if executor == 'claude' else 'claude'
-    reviewer = other if pref == 'auto' else (None if pref == 'off' else pref)
     usable = {'codex': (codex_ok, codex_why), 'claude': (claude_ok, claude_why)}
-    plan = {'setting': pref, 'reviewer': reviewer,
-            'usable': bool(reviewer) and usable.get(reviewer, (False,))[0],
-            'reason': (usable.get(reviewer, (False, 'unknown reviewer'))[1] if reviewer
-                       else 'plan review is off'),
-            'cross_model': other, 'cross_model_usable': usable[other][0]}
-    plan.update(plan_review_pick(pref, reviewer, executor, other, usable))
+    # the runner's plan review: External reviewer is its external review tool (never under the
+    # Codex executor), Same agent is the planner executor, read-only
+    offered = {REVIEW_EXTERNAL: (code['usable'], code['reason']),
+               REVIEW_SAME: usable[executor]}
+    plan = {'setting': pref, 'by': 'runner', 'external_tool': code['tool']}
+    plan.update(plan_review_pick(pref, executor, offered, code['tool']))
     fallback = 'codex' if executor == 'claude' and not claude_ok and codex_ok else None
     run_ok, run_why = usable[executor]
     if executor == 'codex' and run_ok:
@@ -1363,140 +1396,6 @@ def review_capability(repo, cfg=None):
     return {'code_review': code, 'plan_review': plan, 'execution': execution,
             'codex': {'usable': codex_ok, 'reason': codex_why},
             'claude': {'usable': claude_ok, 'reason': claude_why}}
-
-
-PLAN_REVIEW_PROMPT = """Review an implementation plan before any code is written. Read the plan
-below, then read the project's CLAUDE.md or AGENTS.md (if present) and the source files the plan
-names, so you judge the plan against the code as it is. Do not modify any file.
-
-Report:
-- assumptions about existing code that the code contradicts (wrong names, paths, signatures, behavior)
-- missing steps that would leave the task unsolved, or changes the plan forgets (callers, tests, docs)
-- over-engineering: abstractions, options or layers the task does not need
-- task ordering that breaks the build or tests between tasks, and tasks that cannot be tested as written
-- validation commands that are wrong for this project
-- conflicts with the project conventions in CLAUDE.md or AGENTS.md
-
-The plan follows the runner's fixed format ("### Task N:" sections with checkboxes, a
-"## Validation Commands" section). Do not report that format or its boilerplate as findings.
-
-Tag each finding with severity:
-- CRITICAL: the plan, as written, fails to solve the task or breaks existing behavior
-- MAJOR: a wrong assumption, missing step or design flaw that will cost rework during implementation
-- MINOR: clarity, naming, optional simplifications
-
-Write each finding on its own line as: `SEVERITY: <plan section or task> - <description> -> <change>`.
-If nothing is found, answer exactly: NO ISSUES FOUND.
-
-Task: {task}
-
-Plan ({path}):
-{plan}
-"""
-
-FINDING_RE = re.compile(r'^\s*(?:[-*]\s*)?(?:\*\*)?(?:\[(high|medium|low)\]|(CRITICAL|MAJOR|MINOR)(?:\*\*)?:)',
-                        re.I)
-SEVERITY = {'high': 'CRITICAL', 'medium': 'MAJOR', 'low': 'MINOR'}
-
-
-def plan_findings(stdout):
-    """Numbered findings from the reviewer's stdout, each with its severity and text."""
-    found = []
-    for line in stdout.splitlines():
-        m = FINDING_RE.match(line)
-        if m:
-            sev = (m.group(2) or SEVERITY[m.group(1).lower()]).upper()
-            text = line[m.end():].strip(' *:-')
-            if text and (sev, text) not in [(f['severity'], f['text']) for f in found]:
-                found.append({'n': len(found) + 1, 'severity': sev, 'text': text})
-        elif found and line.startswith(('  ', '\t')) and line.strip():
-            found[-1]['text'] += ' ' + line.strip()  # a wrapped finding goes on
-    return found
-
-
-def cmd_review_plan(args):
-    """Have the other model review a plan read-only, through the router when configured."""
-    repo = git_root()
-    plan = Path(args.plan)
-    if not plan.is_file():
-        die(f'plan file not found: {plan}')
-    cfg = merged(cli_config_paths(repo)).get('', {})
-    sdir = session_dir(args.session) if args.session else None
-    # the session's actual executor (after a fallback) decides who "the other model" is
-    executor = args.executor or (read_json(sdir / 'session.json', {}) or {}).get('executor') \
-        if sdir else args.executor
-    if executor:
-        cfg['executor'] = executor
-    cap = review_capability(repo, cfg)
-    executor = cfg.get('executor') or 'claude'
-    if args.options:
-        pick = cap['plan_review']
-        emit({'plan': str(plan), 'executor': executor, 'setting': pick['setting'],
-              'recommended': pick['recommended'], 'recommended_why': pick['recommended_why'],
-              'options': pick['options'],
-              'review_pick': {'timeout_s': load_policy()['review_pick']['timeout']}})
-        return
-    pick = cap['plan_review']
-    default = {o['option']: o['reviewer'] for o in pick['options']}.get(pick['recommended'])
-    reviewer = {'external': pick['cross_model'], 'same': executor}.get(
-        args.reviewer, args.reviewer) or default or pick['reviewer'] or pick['cross_model']
-    kind = 'same agent' if reviewer == executor else 'external'
-    ok = cap['codex']['usable'] if reviewer == 'codex' else cap['claude']['usable']
-    if not ok:
-        if sdir:
-            log_decision(sdir, kind='note', by='autopilot',
-                         text=f'Plan review ({reviewer}, {kind}) skipped',
-                         reason=cap[reviewer]['reason'])
-        emit({'ok': False, 'skipped': True, 'reviewer': reviewer, 'review': kind,
-              'reason': cap[reviewer]['reason'], 'findings': [], 'no_findings': False})
-        return
-    prompt = PLAN_REVIEW_PROMPT.format(task=args.task or '(see the plan overview)', path=plan,
-                                       plan=plan.read_text(encoding='utf-8', errors='replace'))
-    wrapper = parse_wrapper(repo, cfg.get('codex_command'))
-    if reviewer == 'codex':
-        command = cfg.get('codex_command') if wrapper and wrapper['routes'] else 'codex'
-        argv = [command, 'exec', '--sandbox', 'read-only']
-    elif ROUTER in cfg.get('claude_command', ''):
-        docs = [f'--doc={d}' for d in claude_docs(cfg.get('claude_args')) if (Path(repo) / d).is_file()]
-        argv = [ROUTER, 'exec', 'claude', *docs, '--', '--permission-mode', 'plan']
-    else:
-        argv = ['claude', '-p', '--permission-mode', 'plan']
-    env = {k: v for k, v in os.environ.items() if k not in HOST_SESSION_VARS}
-    started = now()
-    try:
-        env['PYTHONUTF8'] = '1'
-        env['AUTOPILOT_PYTHON'] = sys.executable
-        res = subprocess.run(**command_kwargs(argv), input=prompt, capture_output=True,
-                             text=True, encoding='utf-8', errors='replace', cwd=repo, env=env,
-                             timeout=args.timeout)
-        # findings come from stdout only: codex echoes the whole prompt on stderr, and the
-        # prompt's own severity words would read as findings (each one listed twice)
-        code, output, errors = res.returncode, res.stdout or '', res.stderr or ''
-    except subprocess.TimeoutExpired:
-        code, output, errors = None, '', f'review timed out after {args.timeout} s'
-    except OSError as exc:
-        code, output, errors = None, '', str(exc)
-    out = plan_store(plan) / f'review-{time.strftime("%Y%m%d-%H%M%S")}-{reviewer}.md'
-    out.write_text(output, encoding='utf-8')
-    if errors:
-        out.with_suffix('.err').write_text(errors, encoding='utf-8')
-    findings = plan_findings(output) if code == 0 else []
-    clean = code == 0 and not findings and ('no issues found' in output.lower()
-                                           or 'no findings' in output.lower())
-    ok = code == 0 and (bool(findings) or clean)
-    status = (f'{len(findings)} findings' if findings else 'no issues found' if clean
-              else 'failed: ' + ((errors or output).strip().splitlines() or [f'exit {code}'])[-1][:200])
-    if sdir:
-        counts = ', '.join(f"{sum(f['severity'] == s for f in findings)} {s.lower()}"
-                           for s in ('CRITICAL', 'MAJOR', 'MINOR'))
-        log_decision(sdir, kind='note', by='autopilot',
-                     text=f'Plan review ({reviewer}, {kind}): {status}'
-                     + (f' ({counts})' if findings else ''), reason=str(out))
-    emit({'ok': ok, 'reviewer': reviewer, 'review': kind, 'status': status,
-          'command': ' '.join(argv[:3]), 'exit_code': code,
-          'seconds': round(now() - started), 'file': str(out), 'findings': findings[:30],
-          'no_findings': clean,
-          'tail': (errors or output).splitlines()[-15:] if not ok else []})
 
 
 def spec_problems(executor, cfg, catalog=None):
@@ -1644,6 +1543,11 @@ def cmd_doctor(args):
     if not info['router']['path']:
         missing.append('model router (agrouter) is not installed')
     incomplete = []
+    if cli:
+        info['cli']['plan_review'] = runner_has_plan_review(cli)
+        if info['cli']['plan_review'] is False:
+            incomplete.append(f"{info['cli']['name']} {info['cli']['version']} has no plan review "
+                              '(v1.7.0-windows.4 or newer): upgrade it with autopilot-setup')
     if info['router']['path'] and not info['router_config']['key_set']:
         incomplete.append('classifier API key is not set')
     apaths = autopilot_config_paths(repo)
@@ -1898,8 +1802,16 @@ def start_session(kind, target, cli_args, max_restarts, flow=None, extra=None):
     sdir = state_root() / 'sessions' / sid
     (sdir / 'inbox').mkdir(parents=True)
     write_shims(sdir)
+    review_only = (extra or {}).get('mode') == 'review'
+    review_native = runner_has_plan_review(cli) if kind == 'plan' else None
+    if review_only and review_native is False:
+        die(f"{Path(cli).name} has no --plan-review (it needs v1.7.0-windows.4 or newer): "
+            'upgrade it with autopilot-setup')
     argv = [cli, '--no-color']
-    argv += ['--plan', target] if kind == 'plan' else [target]
+    if kind == 'plan':
+        argv += ['--plan-review', target] if review_only else ['--plan', target]
+    else:
+        argv += [target]
     added = []
     if not any(a == '--wait' or a.startswith('--wait=') for a in cli_args) \
             and not effective.get('wait_on_limit'):
@@ -1923,8 +1835,15 @@ def start_session(kind, target, cli_args, max_restarts, flow=None, extra=None):
         'flow': flow or f'flow-{stamp}-{secrets.token_hex(2)}', 'executor': executor,
         'policy': load_policy(),
         'created_iso': time.strftime('%Y-%m-%dT%H:%M:%S'),
-        'repo_hash': hashlib.sha1(repo.encode()).hexdigest()[:8], **(extra or {})})
-    write_json(sdir / 'state.json', {'status': 'starting', 'seq': 0, 'events': []})
+        'repo_hash': hashlib.sha1(repo.encode()).hexdigest()[:8], 'plan_review': review_native,
+        **(extra or {})})
+    write_json(sdir / 'state.json', {'status': 'starting', 'seq': 0, 'events': [],
+                                     **({'plan_file': target} if review_only else {})})
+    if kind == 'plan' and review_native is False:
+        log_decision(sdir, kind='note', by='autopilot',
+                     text='the runner has no plan review: the plan gets no review by another model',
+                     reason=f'{Path(cli).name} is older than v1.7.0-windows.4; upgrade it with '
+                            'autopilot-setup')
     if executor_note:
         log_decision(sdir, kind='decision', by='autopilot',
                      text='switched this session to the Codex executor; phase models reset to routing',
@@ -1950,11 +1869,21 @@ def start_session(kind, target, cli_args, max_restarts, flow=None, extra=None):
     meta = read_json(sdir / 'session.json')
     emit({'session': sid, 'flow': meta['flow'], 'state_dir': str(sdir),
           'supervisor_pid': proc.pid, 'command': ' '.join(argv),
-          'executor': executor, 'executor_fallback_reason': executor_note})
+          'executor': executor, 'executor_fallback_reason': executor_note,
+          **({'plan_review': review_native} if kind == 'plan' else {})})
 
 
 def cmd_plan(args):
     start_session('plan', args.desc, args.cli_args, args.max_restarts, args.flow)
+
+
+def cmd_plan_review(args):
+    """The runner's own review of an existing plan file (--plan-review), relayed like planning."""
+    plan = Path(args.plan)
+    if not plan.is_file():
+        die(f'plan file not found: {plan}')
+    start_session('plan', args.plan, args.cli_args, args.max_restarts, args.flow,
+                  extra={'mode': 'review'})
 
 
 def cmd_run(args):
@@ -2080,6 +2009,7 @@ class Supervisor:
         self.head = None        # last commit already reported
         self.head_where = None  # the checkout self.head belongs to
         self.stalled = False
+        self.findings = None    # plan review findings being read, None outside that block
         self.state.setdefault('task_log', {})
 
     # -- state
@@ -2222,11 +2152,13 @@ class Supervisor:
             lines = (partial + text).split('\n')
             partial = lines.pop()
             for line in lines:
-                self.scan_line(clean_line(line))
+                self.scan_line(clean_line(line), TS_RE.sub('', line))
         if partial:
-            self.scan_line(clean_line(partial))
+            self.scan_line(clean_line(partial), TS_RE.sub('', partial))
 
-    def scan_line(self, line):
+    def scan_line(self, line, raw=None):
+        if self.meta['kind'] == 'plan' and self.scan_review(line, raw if raw is not None else line):
+            return
         m = SECTION_RE.match(line)
         if m:
             label = m.group(1)
@@ -2265,6 +2197,36 @@ class Supervisor:
             errs.append({'t': time.strftime('%H:%M:%S'), 'line': line[:300]})
             self.state['errors'] = errs[-8:]
             self.event('error', line=line[:300])
+
+    def scan_review(self, line, raw):
+        """The runner's plan review: collect its numbered findings, report its outcome lines.
+
+        The findings come between "plan review findings:" and the findings question, one
+        "N. SEVERITY: text" line each; a long finding wraps onto indented lines.
+        """
+        if line == 'plan review findings:':
+            self.findings = []
+            self.state['review_findings'] = self.findings
+            return True
+        if self.findings is not None:
+            m = REVIEW_FINDING_RE.match(line)
+            if m:
+                self.findings.append({'n': int(m.group(1)), 'severity': m.group(2),
+                                      'text': m.group(3).strip()})
+                return True
+            if self.findings and line and raw[:1].isspace():
+                self.findings[-1]['text'] += ' ' + line
+                return True
+            self.findings = None
+        if not REVIEW_LINE_RE.match(line):
+            return False
+        if line == 'plan revised':
+            self.state['review_revised'] = self.state.get('review_revised', 0) + 1
+        what = re.sub(r'^(warning|note): ', '', line).rstrip('.')
+        warn = line.startswith(('warning:', 'note:'))
+        self.event('plan-review', text=what, warning=warn)
+        log_decision(self.sdir, kind='note', by='ralphex', text=f'Plan review: {what}')
+        return True
 
     def scan_model(self, line):
         """Record which CLI/model/effort runs now; True when the line was a selection.
@@ -2489,19 +2451,80 @@ class Supervisor:
             self.event('auto-answer', question=prompt['question'], answer='no')
             return
         current = dict(self.state.get('waiting') or {})
-        for field in ('id', 'asked_at', 'deadline', 'remind_at', 'reminded', 'policy_key'):
+        for field in ('id', 'asked_at', 'deadline', 'remind_at', 'reminded', 'policy_key',
+                      'review'):
             current.pop(field, None)
         if current != prompt:
             prompt['id'] = self.state['seq'] + 1
             prompt['asked_at'] = now()
             key = prompt['kind'] if self.meta['kind'] == 'plan' or prompt['kind'] == 'text' \
                 else 'runtime'
+            review = self.review_prompt(prompt)
+            if review:
+                prompt['review'] = review
+                key = 'review_pick' if review['step'] == 'pick' else 'review_apply'
             rule = (self.meta.get('policy') or load_policy()).get(key) or {}
             prompt['policy_key'] = key
             self.set_deadline(prompt, rule.get('timeout'), rule.get('remind_before'))
             self.state['waiting'] = prompt
             self.state['status'] = 'waiting'
             self.event('waiting', prompt=prompt)
+
+    def review_prompt(self, prompt):
+        """Context for one of the runner's plan review questions, or None for other prompts.
+
+        `default` is the answer taken when the response time passes with no recommendation
+        registered: the [review] plan reviewer for the first round (skip after a revision),
+        and the CRITICAL and MAJOR findings for the findings question.
+        """
+        if self.meta['kind'] != 'plan' or prompt['kind'] not in ('question', 'choice'):
+            return None
+        question = prompt.get('question', '').rstrip(': ').strip()
+        offered = [o for o in prompt.get('options') or [] if o != OTHER]
+        plan = self.review_plan_file()
+        if question == REVIEW_PICK_Q:
+            self.state['review_rounds'] = self.state.get('review_rounds', 0) + 1
+            gone = 'the runner does not offer it (no external review tool, or the Codex executor)'
+            pick = plan_review_pick(
+                autopilot_config('review').get('plan', 'auto'),
+                self.meta.get('executor') or 'claude',
+                {REVIEW_EXTERNAL: (REVIEW_EXTERNAL in offered, None if REVIEW_EXTERNAL in offered
+                                   else gone),
+                 REVIEW_SAME: (REVIEW_SAME in offered, None)},
+                revised=self.state.get('review_revised', 0))
+            return {'step': 'pick', 'round': self.state['review_rounds'], 'plan_file': plan,
+                    'default': {'answer': pick['recommended'], 'reason': pick['recommended_why']}}
+        if question == REVIEW_APPLY_Q:
+            findings = list(self.state.get('review_findings') or [])
+            serious = [str(f['n']) for f in findings if f['severity'] in ('CRITICAL', 'MAJOR')]
+            if serious:
+                default = {'answer': ','.join(serious),
+                           'reason': 'applies the critical and major findings'}
+            else:
+                default = {'answer': REVIEW_NONE, 'reason': 'only minor findings' if findings
+                           else 'the findings could not be read'}
+            counts = ', '.join(f"{sum(f['severity'] == s for f in findings)} {s.lower()}"
+                               for s in ('CRITICAL', 'MAJOR', 'MINOR'))
+            log_decision(self.sdir, kind='note', by='ralphex',
+                         text=f"Plan review round {self.state.get('review_rounds', 1)} "
+                              f"({self.state.get('review_reviewer') or 'reviewer'}): "
+                              f"{len(findings)} findings ({counts})")
+            return {'step': 'apply', 'round': self.state.get('review_rounds', 1),
+                    'plan_file': plan, 'reviewer': self.state.get('review_reviewer'),
+                    'findings': findings, 'default': default}
+        return None
+
+    def review_plan_file(self):
+        """The plan under review: known for --plan-review, else the newest plan of this session."""
+        if self.state.get('plan_file'):
+            return self.state['plan_file']
+        repo = Path(self.meta['repo'])
+        plans = repo / (merged(cli_config_paths(str(repo))).get('', {}).get('plans_dir')
+                        or 'docs/plans')
+        since = self.meta.get('created', 0) - 2
+        found = sorted((f.stat().st_mtime, f) for f in plans.glob('*.md')
+                       if f.stat().st_mtime >= since) if plans.is_dir() else []
+        return found[-1][1].relative_to(repo).as_posix() if found else None
 
     def process_inbox(self):
         for path in sorted((self.sdir / 'inbox').glob('*.json')):
@@ -2566,6 +2589,8 @@ class Supervisor:
         self.state['answered_at'] = now()
         self.state['waiting'] = None
         self.state['status'] = 'running'
+        if (waiting.get('review') or {}).get('step') == 'pick':
+            self.state['review_reviewer'] = summary
         log_decision(self.sdir, kind='answer', by=by, prompt=waiting['kind'],
                      question=describe_prompt(waiting), options=waiting.get('options'),
                      answer=summary, reason=reason, **extra)
@@ -3136,6 +3161,11 @@ def describe_prompt(w):
 def fallback_answer(w):
     """Safe default when nobody answered and no recommendation was registered."""
     kind = w['kind']
+    default = (w.get('review') or {}).get('default')
+    if default:
+        send, summary = build_answer(w, argparse.Namespace(
+            text=default['answer'], choice=None, text_file=None))
+        return send, summary, f"took the default: {default['reason']}"
     if kind in ('question', 'choice') and w.get('options'):
         first = w['options'][0]
         send = first + '\n' if kind == 'question' else '1\n'
@@ -3457,6 +3487,9 @@ def event_line(e):
         return f"⏱ No reply: answered \"{e.get('summary')}\". {e.get('reason') or ''}".strip()
     if k == 'review-skipped':
         return f"• External review skipped ({e.get('how')})."
+    if k == 'plan-review':
+        text = e.get('text') or ''
+        return f"{'⚠' if e.get('warning') else '•'} Plan review: {text[:1].upper()}{text[1:]}."
     if k == 'error':
         return f"⚠ {e.get('line')}"
     if k == 'wake':
@@ -3588,11 +3621,24 @@ def next_text(out, sdir):
         rec = rec if rec.get('prompt_id') == w.get('id') else {}
         left = out.get('auto_answer_in_s')
         when = (f"auto-answer at {clock(left)}" if left is not None else 'no auto-answer: waits for the user')
-        lines.append(f"PROMPT {w['kind']} (id {w.get('id')}) · {when}")
+        review = w.get('review') or {}
+        step = {'pick': ' · plan review: which reviewer',
+                'apply': ' · plan review: which findings'}.get(review.get('step'), '')
+        lines.append(f"PROMPT {w['kind']} (id {w.get('id')}){step} · {when}")
         lines.append('recommended: ' + (f"{rec['summary']} ({rec.get('reason') or ''})" if rec
                                         else f'none registered; run {ap} recommend first'))
+        if review.get('default') and not rec:
+            lines.append(f"default on no reply: {review['default']['answer']} "
+                         f"({review['default']['reason']})")
+        if review:
+            lines.append(f"plan: {review.get('plan_file') or 'unknown'} · round {review.get('round')}"
+                         + (f" · reviewer: {review['reviewer']}" if review.get('reviewer') else ''))
         if w.get('question') and w['kind'] != 'draft':
             lines.append('question: ' + one_line(w['question']))
+        if review.get('step') == 'apply':
+            lines.append('findings:')
+            lines += [f"  #{f['n']} {f['severity']}: {one_line(f['text'])}"
+                      for f in review.get('findings') or []] or ['  (none read from the output)']
         if w.get('prompt'):
             lines.append('prompt: ' + one_line(w['prompt']))
         for i, opt in enumerate(w.get('options') or [], 1):
@@ -3602,6 +3648,9 @@ def next_text(out, sdir):
             lines.append(f"edit copy: {w.get('edited_file')}")
             lines.append(f'answer: {ap} answer {sid} --action accept | --action revise --text "..." '
                          '| --action edited | --action reject')
+        elif review.get('step') == 'apply':
+            lines.append(f'answer: {ap} answer {sid} --text "1,3" | --text "2-4" | '
+                         f'--text "{REVIEW_ALL}" | --text "{REVIEW_NONE}"')
         elif w['kind'] in ('question', 'choice'):
             lines.append(f'answer: {ap} answer {sid} --choice N'
                          + (' | --text "..."' if w.get('free_text') or w['kind'] == 'question' else ''))
@@ -4321,6 +4370,11 @@ def main(argv=None):
     s.add_argument('--max-restarts', type=int, default=2)
     s.add_argument('--flow', help='flow id shared by the sessions of one full run')
     s.set_defaults(fn=cmd_plan)
+    s = sub.add_parser('plan-review')
+    s.add_argument('plan')
+    s.add_argument('--max-restarts', type=int, default=2)
+    s.add_argument('--flow', help='flow id shared by the sessions of one full run')
+    s.set_defaults(fn=cmd_plan_review)
     s = sub.add_parser('run')
     s.add_argument('--plan', required=True)
     s.add_argument('--max-restarts', type=int, default=5)
@@ -4394,18 +4448,6 @@ def main(argv=None):
     s.add_argument('--by', default='user', choices=['user', 'agent'])
     s.add_argument('--reason')
     s.set_defaults(fn=cmd_skip_review)
-    s = sub.add_parser('review-plan')
-    s.add_argument('plan')
-    s.add_argument('--task', help='the task the plan should cover')
-    s.add_argument('--reviewer', choices=['codex', 'claude', 'external', 'same'],
-                   help='external: the other model; same: the executor model')
-    s.add_argument('--session', help='log the outcome in this session\'s decision log')
-    s.add_argument('--executor', choices=['codex', 'claude'],
-                   help='actual planning executor, including a per-session fallback')
-    s.add_argument('--timeout', type=int, default=900)
-    s.add_argument('--options', action='store_true',
-                   help='print the review options and the recommended one; run nothing')
-    s.set_defaults(fn=cmd_review_plan)
     s = sub.add_parser('extend')
     s.add_argument('session')
     s.add_argument('--by', default='30m', help='more time from now: 10m, 1h, ...')

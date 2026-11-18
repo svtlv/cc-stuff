@@ -4,7 +4,7 @@ description: This skill should be used when the user runs "/autopilot-setup" or 
 argument-hint: "[tools | key | repo | reconfigure] (default: all, or reconfigure when the repository is already set up)"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion
 metadata:
-  version: "0.5.0"
+  version: "0.6.0"
 ---
 
 # Autopilot Setup
@@ -57,7 +57,7 @@ Run `AP doctor --json --latest` from the repository root. Show a status table:
 
 | Item | Installed | Latest | Action |
 |---|---|---|---|
-| Plan runner | `cli.version` | `latest.cli` | install / upgrade / ok |
+| Plan runner | `cli.version`, `cli.plan_review` | `latest.cli` | install / upgrade / ok (upgrade when `cli.plan_review` is false: v1.7.0-windows.4 adds the plan review) |
 | Model router | `router.version` | `latest.router` | install / upgrade / ok |
 | claude / codex CLIs | `reviews.claude`, `reviews.codex` | — | usable / missing / logged out / disabled |
 | Classifier key | `router_config.key_set` (+ provider) | — | set / missing |
@@ -171,16 +171,18 @@ value (from `AP config-summary`) as the "keep" option. Ask, in order:
      none. When Codex is configured but not usable, explain that runs skip
      it automatically, and offer to fix it (install, `codex login`) or set
      `none`.
-   - **Plan review**: after ralphex writes the plan, autopilot offers one
-     read-only review of it, as `/planning:make` does: external (the other
-     model, `plan_review.cross_model`) or same agent. Autopilot always asks
-     which review to run. This key sets the recommended option, which is
-     taken after the `review_pick` time so the flow never blocks. Offer
-     `auto` (Recommended: the other model, or the same agent when the other
-     model is not usable), `codex`, `claude` or `off` (recommend no
-     review). Write it with
+   - **Plan review**: after ralphex writes the plan, ralphex reviews it
+     read-only (v1.7.0-windows.4 or newer) and always asks which reviewer
+     to use: External reviewer (its external review tool, Codex in the
+     Claude setup; not offered under the Codex executor), Same agent, or
+     Skip review. Autopilot relays the question. This key sets the default
+     answer, taken after the `review_pick` time so the flow never blocks.
+     Offer `auto` (Recommended: External reviewer, or Same agent when
+     ralphex does not offer it), `codex`, `claude` or `off` (Skip review).
+     Write it with
      `AP config-set .autopilot/config plan --section review --value auto`.
-     Honor a request to skip either model's review.
+     Honor a request to skip either model's review. When
+     `cli.plan_review` is false, upgrade ralphex.windows first.
 7. **Wait on limits**: wait 15 minutes and retry (Recommended) or stop.
 8. **Publish**: after a run, push the branch and open a pull request into
    the branch the run started from (Recommended), push only, or keep it

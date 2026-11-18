@@ -71,11 +71,43 @@ FAKE = textwrap.dedent('''\
     import autopilot
     args = [a for a in sys.argv[1:] if a != '--no-color']
     if args == ['--version']:
-        print('fake-ralphex 1.0.0'); sys.exit(0)
+        print('ralphex v1.7.0-windows.4'); sys.exit(0)
     def out(s, end='\\n'):
         sys.stdout.write(s + end); sys.stdout.flush()
     def line():
         return sys.stdin.readline().strip()
+    def ask(question, options):
+        # like the runner's AskQuestion: fzf (the driver's shim) says "no match", then stdin
+        import shutil
+        p = subprocess.run([shutil.which('fzf'), '--prompt', question + ': ', '--height', '10'],
+                           input='\\n'.join(options + ['Other (type your own answer)']) + '\\n',
+                           text=True, capture_output=True)
+        assert p.returncode == 1, p.returncode
+        out('Enter your answer: ', end='')
+        return line()
+    def review(plan):
+        # the runner's plan review loop: reviewer, findings, revision, then the question again
+        for rnd in (1, 2):
+            pick = ask('Review the plan before implementation?',
+                       ['External reviewer', 'Same agent', 'Skip review'])
+            out('REVIEWER: ' + pick)
+            if pick == 'Skip review':
+                out('[26-01-01 10:00:03] plan review skipped'); return
+            out('\\n--- plan review round %d ---\\n' % rnd)
+            if rnd == 2:
+                out('[26-01-01 10:00:04] plan review found no issues'); return
+            out('[26-01-01 10:00:03] plan review findings:')
+            out('[26-01-01 10:00:03]   1. CRITICAL: Task 1 - no test step')
+            out('[26-01-01 10:00:03]   2. MINOR: Overview - wording')
+            out('[26-01-01 10:00:03]   3. MAJOR: Task 1 - wrong path src/a.py, the file')
+            out('[26-01-01 10:00:03]   is src/b.py')
+            picked = ask('Which findings should be applied?', ['All findings', 'None'])
+            out('SELECTED: ' + picked)
+            if picked == 'None':
+                out('[26-01-01 10:00:03] no findings selected, plan left unchanged'); return
+            out('[26-01-01 10:00:03] applying selected findings to the plan...')
+            plan.write_text(plan.read_text() + '- [ ] test it\\n')
+            out('[26-01-01 10:00:04] plan revised')
     if os.environ.get('FAKE_FATAL'):
         out('error: unknown flag --bogus'); sys.exit(2)
     if os.environ.get('FAKE_MODE') == 'claude-down' and '--codex' not in args:
@@ -123,7 +155,16 @@ FAKE = textwrap.dedent('''\
             break
         Path('docs/plans').mkdir(parents=True, exist_ok=True)
         Path('docs/plans/cache.md').write_text('### Task 1: add\\n- [ ] do it\\n')
+        if os.environ.get('FAKE_MODE') == 'plan-review':
+            review(Path('docs/plans/cache.md'))
         out('\\nplan creation completed in 1s, created docs/plans/cache.md')
+        out('Continue with plan implementation? [y/N]: ', end='')
+        out('ANSWER-CONTINUE: ' + line())
+        sys.exit(0)
+    if args[0] == '--plan-review':
+        out('ARGS: ' + ' '.join(args))
+        review(Path(args[1]))
+        out('\\nplan review completed in 1s')
         out('Continue with plan implementation? [y/N]: ', end='')
         out('ANSWER-CONTINUE: ' + line())
         sys.exit(0)
@@ -382,6 +423,75 @@ class AutopilotDriver(unittest.TestCase):
         for expected in ('ANSWER: In-memory, local', 'FEEDBACK: split into two',
                          'EDITED: EDITED BY USER', 'ANSWER-CONTINUE: n'):
             self.assertIn(expected, log)
+
+    def test_runner_plan_review_is_relayed_with_defaults(self):
+        env = dict(self.env, FAKE_MODE='plan-review',
+                   AUTOPILOT_TIMEOUTS='question=1,draft=1,review_pick=1,review_apply=1')
+        sid = self.drive('plan', '--desc', 'add caching', env=env)['session']
+        rep = self.until(sid, 'waiting')
+        seen = {}
+        deadline = time.time() + 40
+        while rep['status'] != 'done' and time.time() < deadline:
+            w = rep.get('waiting') or {}
+            review = w.get('review')
+            if review and w['id'] not in seen:
+                seen[w['id']] = review
+                if review['step'] == 'apply':
+                    sdir = Path(self.env['AUTOPILOT_STATE_DIR']) / 'sessions' / sid
+                    text = autopilot.next_text(rep, sdir)
+                    self.assertIn('plan review: which findings', text)
+                    self.assertIn('#3 MAJOR: Task 1 - wrong path src/a.py, the file is src/b.py', text)
+                    self.assertIn('default on no reply: 1,3', text)
+            rep = self.wait(sid, rep['seq'])
+        self.assertEqual(rep['status'], 'done', rep)
+        steps = [(r['step'], r['round'], r['default']['answer']) for r in seen.values()]
+        self.assertEqual(steps, [('pick', 1, 'External reviewer'), ('apply', 1, '1,3'),
+                                 ('pick', 2, 'Skip review')])
+        first = list(seen.values())[0]
+        self.assertEqual(first['plan_file'], 'docs/plans/cache.md')
+        self.assertEqual([f['severity'] for f in list(seen.values())[1]['findings']],
+                         ['CRITICAL', 'MINOR', 'MAJOR'])
+        log = Path(rep['log']).read_text()
+        for expected in ('REVIEWER: External reviewer', 'SELECTED: 1,3', 'REVIEWER: Skip review',
+                         'ANSWER-CONTINUE: n'):
+            self.assertIn(expected, log)
+        self.assertIn('- [ ] test it', (self.repo / 'docs/plans/cache.md').read_text())
+        report = self.drive('report', sid)
+        timeouts = [(t['question'], t['chosen']) for t in report['timeouts']]
+        self.assertIn(('Which findings should be applied?', '1,3'), timeouts)
+        notes = [d['text'] for d in report['decisions'] if d['kind'] == 'note']
+        self.assertIn('Plan review round 1 (External reviewer): 3 findings '
+                      '(1 critical, 1 major, 1 minor)', notes)
+        self.assertIn('Plan review: plan revised', notes)
+        st = json.loads((Path(self.env['AUTOPILOT_STATE_DIR']) / 'sessions' / sid
+                         / 'state.json').read_text())
+        lines = [autopilot.event_line(e) for e in st['events'] if e['kind'] == 'plan-review']
+        self.assertIn('• Plan review: Plan revised.', lines)
+        self.assertIn('• Plan review: Plan review skipped.', lines)
+
+    def test_plan_review_of_an_existing_plan(self):
+        plan = self.repo / 'docs/plans/p.md'
+        plan.parent.mkdir(parents=True)
+        plan.write_text('### Task 1: one\n- [ ] a\n')
+        start = self.drive('plan-review', 'docs/plans/p.md')
+        self.assertIn('--plan-review docs/plans/p.md', start['command'])
+        sid = start['session']
+        rep = self.until(sid, 'waiting')
+        self.assertEqual(rep['waiting']['review']['plan_file'], 'docs/plans/p.md')
+        self.drive('answer', sid, '--choice', '2')
+        rep = self.until(sid, 'waiting', rep['seq'])
+        self.assertEqual(rep['waiting']['review']['reviewer'], 'Same agent')
+        self.drive('answer', sid, '--text', 'None', '--reason', 'all settled in chat')
+        rep = self.until(sid, 'done', rep['seq'])
+        self.assertEqual(rep['plan_file'], 'docs/plans/p.md')
+        log = Path(rep['log']).read_text()
+        for expected in ('REVIEWER: Same agent', 'SELECTED: None', 'ANSWER-CONTINUE: n'):
+            self.assertIn(expected, log)
+        self.assertIn('error', self.drive('plan-review', 'docs/plans/missing.md'))
+        old = dict(self.env, AUTOPILOT_PLAN_REVIEW='0')
+        self.assertIn('v1.7.0-windows.4', self.drive('plan-review', 'docs/plans/p.md', env=old)['error'])
+        self.assertTrue(any('has no plan review' in x for x in
+                            self.drive('doctor', '--json', env=old)['setup_incomplete']))
 
     def test_run_restarts_after_transient_failure(self):
         plan = self.repo / 'docs/plans/p.md'
@@ -805,18 +915,12 @@ class AutopilotDriver(unittest.TestCase):
         self.assertTrue(cap['codex']['usable'])
         self.assertFalse(cap['claude']['usable'])
         self.assertIn('claude auth login', cap['claude']['reason'])
-        self.assertFalse(cap['plan_review']['usable'])
-        # the question still offers a review: the executor reviews when the other model cannot
-        self.assertEqual(cap['plan_review']['recommended'], 'same')
+        # the runner offers no External reviewer under the Codex executor: Same agent reviews
+        self.assertEqual(cap['plan_review']['recommended'], 'Same agent')
+        self.assertEqual({o['option']: o['usable'] for o in cap['plan_review']['options']},
+                         {'External reviewer': False, 'Same agent': True, 'Skip review': True})
         plan = self.repo / 'p.md'
         plan.write_text('### Task 1: a\n- [ ] a\n')
-        pick = self.drive('review-plan', 'p.md', '--options', env=env)
-        self.assertEqual((pick['recommended'], pick['review_pick']['timeout_s']), ('same', 600))
-        self.assertEqual({o['option']: o['usable'] for o in pick['options']},
-                         {'external': False, 'same': True, 'edit': True, 'none': True})
-        review = self.drive('review-plan', 'p.md', '--reviewer', 'claude', env=env)
-        self.assertTrue(review['skipped'])
-        self.assertEqual(review['reviewer'], 'claude')
         self.commit_configs()
         start = self.drive('run', '--plan', 'p.md', env=env)
         self.assertEqual(start['executor'], 'codex')
@@ -1396,92 +1500,6 @@ class PlanRevision(unittest.TestCase):
         self.assertEqual((d['tasks_before'], d['tasks_after'], d['added']), (1, 2, 3))
 
 
-class ReviewPlan(unittest.TestCase):
-    def test_claude_plan_review_uses_the_actual_codex_executor(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            repo, fakebin = base / 'repo', base / 'bin'
-            repo.mkdir(); fakebin.mkdir()
-            subprocess.run(['git', 'init', '-q'], cwd=repo, check=True)
-            (repo / 'plan.md').write_text('### Task 1: a\n- [ ] test it\n')
-            python_tool(fakebin / 'claude', textwrap.dedent('''\
-                import json, sys
-                from pathlib import Path
-                if 'auth' in sys.argv:
-                    print(json.dumps({'loggedIn': True}))
-                else:
-                    Path('review-args.json').write_text(json.dumps(sys.argv[1:]))
-                    Path('review-prompt.txt').write_text(sys.stdin.read())
-                    print('No findings.')
-                '''))
-            cfg = base / 'autopilot.cfg'
-            cfg.write_text('[review]\nplan = auto\n')
-            env = dict(os.environ, PATH=f"{fakebin}{os.pathsep}{os.environ['PATH']}",
-                       AUTOPILOT_CONFIG=str(cfg), AUTOPILOT_STATE_DIR=str(base / 'state'),
-                       RALPHEX_CONFIG_DIR=str(base / 'none'), AGROUTER_CONFIG_DIR=str(base / 'none'))
-            res = subprocess.run([sys.executable, str(DRIVER), 'review-plan', 'plan.md',
-                                  '--executor', 'codex'], cwd=repo, env=env,
-                                 capture_output=True, text=True, check=True)
-            out = json.loads(res.stdout)
-            self.assertEqual(out['reviewer'], 'claude')
-            self.assertTrue(out['ok'])
-            self.assertTrue(out['no_findings'])
-            self.assertEqual(json.loads((repo / 'review-args.json').read_text()),
-                             ['-p', '--permission-mode', 'plan'])
-            self.assertIn('### Task 1:', (repo / 'review-prompt.txt').read_text())
-
-    def test_cross_model_plan_review_through_fake_codex(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            repo, fakebin = base / 'repo', base / 'bin'
-            repo.mkdir(); fakebin.mkdir()
-            subprocess.run(['git', 'init', '-q'], cwd=repo, check=True)
-            (repo / 'plan.md').write_text('### Task 1: a\n- [ ] a\n')
-            python_tool(fakebin / 'codex', textwrap.dedent('''\
-                import sys
-                from pathlib import Path
-                if '--version' in sys.argv:
-                    print('codex-cli 0.169.0'); sys.exit(0)
-                if 'login' in sys.argv:
-                    sys.exit(0)
-                Path(__file__).with_name('prompt.txt').write_text(sys.stdin.read(), encoding='utf-8')
-                print('args: ' + ' '.join(sys.argv[1:]))
-                print('- [high] Task 1 has no test step -> add one')
-                print('MAJOR: Task 2 - wrong file path')
-                print('  src/a.py does not exist -> use src/b.py')
-                # codex echoes the prompt (with its severity words) on stderr
-                sys.stderr.write('CRITICAL: the plan, as written, fails\\nMAJOR: Task 2 - wrong file path\\n')
-                '''))
-            cfg = base / 'autopilot.cfg'
-            cfg.write_text('[review]\nplan = auto\n')
-            env = dict(os.environ, PATH=f"{fakebin}{os.pathsep}{os.environ['PATH']}",
-                       AUTOPILOT_CONFIG=str(cfg), AUTOPILOT_STATE_DIR=str(base / 'state'),
-                       RALPHEX_CONFIG_DIR=str(base / 'none'), AGROUTER_CONFIG_DIR=str(base / 'none'))
-            sdir = base / 'state' / 'sessions' / 's1'
-            sdir.mkdir(parents=True)
-            (sdir / 'session.json').write_text('{}')
-            res = subprocess.run([sys.executable, str(DRIVER), 'review-plan', 'plan.md',
-                                  '--task', 'add caching', '--reviewer', 'external',
-                                  '--session', str(sdir)], cwd=repo,
-                                 env=env, capture_output=True, text=True)
-            out = json.loads(res.stdout)
-            self.assertEqual(out['reviewer'], 'codex')
-            self.assertEqual(out['review'], 'external')
-            self.assertEqual(out['status'], '2 findings')
-            # stdout only: the prompt echoed on stderr adds no findings
-            self.assertEqual(out['findings'], [
-                {'n': 1, 'severity': 'CRITICAL', 'text': 'Task 1 has no test step -> add one'},
-                {'n': 2, 'severity': 'MAJOR',
-                 'text': 'Task 2 - wrong file path src/a.py does not exist -> use src/b.py'}])
-            logged = json.loads((sdir / 'decisions.jsonl').read_text().splitlines()[-1])
-            self.assertEqual(logged['text'],
-                             'Plan review (codex, external): 2 findings (1 critical, 1 major, 0 minor)')
-            self.assertIn('args: exec --sandbox read-only', Path(out['file']).read_text())
-            prompt = (fakebin / 'prompt.txt').read_text()
-            self.assertIn('Task: add caching', prompt)
-            self.assertIn('### Task 1: a', prompt)
-
-
 class StepsSummary(unittest.TestCase):
     def test_short_line_from_the_plan_steps(self):
         self.assertIsNone(autopilot.steps_summary([]))
@@ -1493,28 +1511,38 @@ class StepsSummary(unittest.TestCase):
 
 
 class PlanReviewPick(unittest.TestCase):
-    def pick(self, pref, codex=True, claude=True, executor='claude'):
-        usable = {'codex': (codex, None if codex else 'codex is not installed'),
-                  'claude': (claude, None if claude else 'claude is logged out')}
-        other = 'codex' if executor == 'claude' else 'claude'
-        reviewer = other if pref == 'auto' else (None if pref == 'off' else pref)
-        return autopilot.plan_review_pick(pref, reviewer, executor, other, usable)['recommended']
+    def pick(self, pref, external=True, same=True, executor='claude', revised=0):
+        offered = {'External reviewer': (external, None if external else 'codex is not installed'),
+                   'Same agent': (same, None if same else 'claude is logged out')}
+        return autopilot.plan_review_pick(pref, executor, offered, revised=revised)['recommended']
 
     def test_recommendation_keeps_the_flow_moving_with_the_best_usable_review(self):
-        self.assertEqual(self.pick('auto'), 'external')
-        self.assertEqual(self.pick('auto', codex=False), 'same')
-        self.assertEqual(self.pick('auto', executor='codex'), 'external')
-        self.assertEqual(self.pick('claude'), 'same')
-        self.assertEqual(self.pick('codex', codex=False), 'same')
-        self.assertEqual(self.pick('auto', codex=False, claude=False), 'none')
-        self.assertEqual(self.pick('off'), 'none')
+        self.assertEqual(self.pick('auto'), 'External reviewer')
+        self.assertEqual(self.pick('auto', external=False), 'Same agent')
+        self.assertEqual(self.pick('codex'), 'External reviewer')
+        self.assertEqual(self.pick('claude'), 'Same agent')
+        self.assertEqual(self.pick('claude', same=False), 'External reviewer')
+        # the Codex executor: the runner offers no External reviewer
+        self.assertEqual(self.pick('claude', external=False, executor='codex'), 'Same agent')
+        self.assertEqual(self.pick('auto', external=False, same=False), 'Skip review')
+        self.assertEqual(self.pick('off'), 'Skip review')
+        self.assertEqual(self.pick('auto', revised=1), 'Skip review')
 
     def test_no_config_recommends_the_external_review(self):
         with unittest.mock.patch.object(autopilot, 'autopilot_config', return_value={}), \
                 unittest.mock.patch.object(autopilot, 'codex_status', return_value=(True, None)), \
                 unittest.mock.patch.object(autopilot, 'claude_status', return_value=(True, None)):
             plan = autopilot.review_capability('/nonexistent', {})['plan_review']
-        self.assertEqual((plan['setting'], plan['recommended']), ('auto', 'external'))
+        self.assertEqual((plan['setting'], plan['recommended'], plan['external_tool']),
+                         ('auto', 'External reviewer', 'codex'))
+
+    def test_runner_version_gates_the_native_review(self):
+        self.assertEqual(autopilot.runner_version('ralphex v1.7.0-windows.4'), (1, 7, 0, 4))
+        self.assertEqual(autopilot.runner_version('ralphex v1.7.0'), (1, 7, 0, 0))
+        self.assertIsNone(autopilot.runner_version('ralphex (devel)'))
+        self.assertTrue(autopilot.runner_version('ralphex v1.8.0') >= autopilot.PLAN_REVIEW_MIN)
+        self.assertFalse(autopilot.runner_version('ralphex v1.7.0-windows.3')
+                         >= autopilot.PLAN_REVIEW_MIN)
 
 
 class ImplementationPlace(unittest.TestCase):

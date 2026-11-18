@@ -26,8 +26,9 @@ wrapper pair, Python selection and review-skip recovery.
 
 | Command | Purpose |
 |---|---|
-| `doctor --json [--latest]` | `cli_config.executor` and `cli_config.spec_problems` (phase specs naming the other executor's models), `host` hint (name, sandboxed, network_disabled) and `state_dir`, tools, versions, config locations, effective runner settings, router key presence (never the key), repo cleanliness, active sessions, plus `missing_tools` (runner or router not installed) and `setup_incomplete` (no key, no repo config) for the setup gate in `preflight.md`. `--latest` asks GitHub for the newest releases. |
-| `plan --desc TEXT [--flow ID] [--max-restarts N] [-- CLI ARGS]` | Start plan creation (`--plan TEXT`). Default 2 restarts. Prints `session` and `flow`. |
+| `doctor --json [--latest]` | `cli.plan_review` (the runner reviews plans: v1.7.0-windows.4 or newer), `cli_config.executor` and `cli_config.spec_problems` (phase specs naming the other executor's models), `host` hint (name, sandboxed, network_disabled) and `state_dir`, tools, versions, config locations, effective runner settings, router key presence (never the key), repo cleanliness, active sessions, plus `missing_tools` (runner or router not installed) and `setup_incomplete` (no key, no repo config) for the setup gate in `preflight.md`. `--latest` asks GitHub for the newest releases. |
+| `plan --desc TEXT [--flow ID] [--max-restarts N] [-- CLI ARGS]` | Start plan creation (`--plan TEXT`), with the runner's plan review after the plan file is written. Default 2 restarts. Prints `session`, `flow` and `plan_review` (false: the runner is too old to review plans). |
+| `plan-review PLAN [--flow ID] [--max-restarts N] [-- CLI ARGS]` | Start the runner's review of an existing plan file (`--plan-review PLAN`): no planner questions, no drafts, no branch. Relayed like a `plan` session. Refuses to start when the runner has no plan review. |
 | `run --plan PATH [--new-worktree] [--worktree-path DIR] [--flow ID] [--max-restarts N] [-- CLI ARGS]` | Start plan execution. Default 5 restarts. Reuse the flow id of the plan and of earlier runs. `--new-worktree` makes `<parent>/workspaces/<repo>/<Name>` with `git worktree add` (`[worktree] path` changes it) or reuses the branch's existing worktree, copies and commits an uncommitted plan and repository configs there, and runs inside it; the session keeps `source_repo`, so this folder's chat, `list` and the hooks still find it. A runner `--worktree` flag is turned into `--new-worktree`. Refuses a place `place` marks unusable. |
 | `next SESSION [--timeout S] [--catch-up] [--json]` | The chat's watch call. `--catch-up` (reattach) also returns an open prompt an earlier watch reported. Blocks until a prompt the chat has not seen, a notable event, the end, or `S` seconds (default 6900, under the 2 h background limit). Continues after the last reported event on its own. Prints short text (see "The `next` Report"); `--json` prints the `wait` report. |
 | `wait SESSION [--since SEQ] [--timeout S] [--any]` | The full JSON report, for diagnosis and tests. Blocks like `next` or until `S` seconds pass (default 240). `--any` also returns on phase changes. |
@@ -56,7 +57,6 @@ wrapper pair, Python selection and review-skip recovery.
 | `plan-rev snapshot\|diff\|supersede PLAN [--by NEW]` | Revisions of a finished plan: snapshot before a change; diff against the last snapshot (with task counts, `checked_boxes_lost` and the check verdict); supersede an old plan by a re-planned one (backup kept, `git rm` when committed). See `plan-revision.md`. |
 | `publish RUN_SESSION [--mode pr\|push\|off] [--base B] [--title T] [--body-file F] [--draft]` | Push the run branch (from its worktree when it has one; never forced) and open a pull request with `gh` (GitHub) or `glab` (GitLab), or reuse an open one. Base: the branch the run started from (`start_branch`); for a run on a feature branch, the branch it was created from (reflog); the default branch when that base is not on the remote. Draft when the run did not finish. Returns `branch`, `folder`, `base`, `base_why`, `commits`, `uncommitted`, `pushed`, `pr` (`url`, `created`, `draft`) or `skipped` with the reason, and logs the outcome. Default mode: `[publish] mode`, else `pr`. |
 | `place [--plan PLAN]` | Where the implementation run should work: `checkout` (`main checkout` or `worktree`), `branch`, `default_branch`, `dirty` (without the plan), `operation`, `use_worktree`, `recommended` (`worktree`, `here` or null), `why`, and `options` (recommended first, each with `run_args` for `run`, `usable`, `reason`, `text`; the worktree option also has its `path`). `run` refuses a place that is not usable (for example a new worktree from a feature branch), unless `--force`. |
-| `review-plan PLAN [--task TEXT] [--reviewer external\|same\|codex\|claude] [--session S] [--executor codex\|claude] [--timeout S] [--options]` | `--options`: run nothing; print the review question's `options` (usable or not, with the reason), the `recommended` option, `recommended_why` and the `review_pick` time. Otherwise: read-only review of a finished plan (no `--reviewer`: the recommended one), routed when the repository routes: `status`, numbered `findings` (`n`, `severity` CRITICAL/MAJOR/MINOR, `text`, from stdout only), `no_findings`, the output file. `--session` uses that session's executor and logs the outcome. An unavailable reviewer returns `ok: false`, `skipped: true`, and `reason`. See `reviews.md`. |
 | `skip-review SESSION [--by user\|agent] [--reason TEXT]` | Skip the run's external code review: SIGQUIT now if it runs, queued until it starts otherwise (restart without it on Windows). |
 | `check-plan FILE` | Can the runner execute this file: `verdict` (`ready`, `warnings`, `redesign`), `status` (`not started`, `in progress`, `complete`), `problems`, `warnings`, the tasks with checkbox counts. Mirrors the runner's parser. See `plan-check.md`. |
 | `config-summary` | The repository's setup property by property (executor, phase models with source local/global/default and mode, docs and wrapper style, router, external review, limits, local router limits, classifier, response-time overrides), issues and file git states. |
@@ -96,6 +96,26 @@ seq 14
 the open prompt with its options and the answer command. A `question` lists
 numbered options under `question:`.
 
+A plan review prompt adds its step to the `PROMPT` line and shows the plan,
+the default and the findings:
+
+```
+PROMPT question (id 21) · plan review: which findings · auto-answer at 17:30 (in 15 min)
+recommended: none registered; run AP recommend first
+default on no reply: 1,3 (applies the critical and major findings)
+plan: docs/plans/add-cache.md · round 1 · reviewer: External reviewer
+question: Which findings should be applied?
+findings:
+  #1 CRITICAL: Task 1 - no test step
+  #2 MINOR: Overview - wording
+  #3 MAJOR: Task 2 - src/a.py does not exist, the code is in src/b.py
+  1. All findings
+  2. None
+answer: AP answer <id> --text "1,3" | --text "2-4" | --text "All findings" | --text "None"
+```
+**Note:** `#N` is the finding number for the answer. `1.` and `2.` are the
+options of the question.
+
 | Last part | Meaning |
 |---|---|
 | `PROMPT <kind> (id N)` | The runner waits for an answer. `recommended:` shows the registered answer, or asks to register one. |
@@ -110,7 +130,7 @@ numbered options under `question:`.
 |---|---|
 | `status` | `running`, `waiting` (needs an answer), `restarting`, `done`, `failed`, `stopped`, `lost` (supervisor died) |
 | `seq` | Event counter. Pass it back as `--since` on the next `wait`. |
-| `new_events` | Events after `--since`, each with its fixed `line` (null when the chat skips it): `task-start` (task, tasks, title, model, iteration, continued, steps), `task-done` (task, title, minutes, models, commit, subject, steps), `phase-start` (section, phase, model), `commit` (outside a task), `router-fallback` (agrouter could not route: `code`, `stage`, `message`, `fields` left to the CLI and their `defaults` with value and source), `router-warning` (other `agrouter: warning:` lines, not errors), `stalled` (no output for `AUTOPILOT_STALL_S`, 20 min), `section`, `waiting`, `answered`, `auto-answered` (deadline passed), `auto-answer` (plan's "continue?"), `needs-input` (free-text prompt without a default), `error`, `restart`, `limit`, `limit-cleared`, `failed`, `done`, `stopped`, `stale-answer` |
+| `new_events` | Events after `--since`, each with its fixed `line` (null when the chat skips it): `task-start` (task, tasks, title, model, iteration, continued, steps), `task-done` (task, title, minutes, models, commit, subject, steps), `phase-start` (section, phase, model), `commit` (outside a task), `router-fallback` (agrouter could not route: `code`, `stage`, `message`, `fields` left to the CLI and their `defaults` with value and source), `router-warning` (other `agrouter: warning:` lines, not errors), `stalled` (no output for `AUTOPILOT_STALL_S`, 20 min), `section`, `waiting`, `answered`, `auto-answered` (deadline passed), `auto-answer` (plan's "continue?"), `plan-review` (an outcome or warning line of the runner's plan review: `text`, `warning`), `needs-input` (free-text prompt without a default), `error`, `restart`, `limit`, `limit-cleared`, `failed`, `done`, `stopped`, `stale-answer` |
 | `updates` | The non-null `line`s of `new_events`, in order: what the chat posts |
 | `auto_answer_in_s`, `auto_answer` | Seconds until the open prompt is answered by default (null: never), and its policy key |
 | `flow` | Flow id shared by the sessions of one full run |
@@ -140,12 +160,23 @@ times with no progress`.
 | `yesno` | `question` | `--yes` or `--no` |
 | `text` | `prompt` | `--text "..."` |
 
+A `question` or `choice` of the runner's plan review also has `review`:
+`step` (`pick` for "Review the plan before implementation?", `apply` for
+"Which findings should be applied?"), `round`, `plan_file`, `default`
+(`answer` and `reason`: what the driver sends when nobody replies and no
+recommendation is registered), and for `apply` the `reviewer` and the
+`findings` (`n`, `severity`, `text`). Answer `pick` with `--text "External
+reviewer"`, `"Same agent"` or `"Skip review"`, and `apply` with `--text
+"1,3"`, `"2-4"`, `"All findings"` or `"None"`. Their response times are
+`review_pick` and `review_apply`.
+
 Answers are single lines: the driver joins line breaks with spaces. Revision
 feedback that needs structure goes into `edited_file` instead, and
 `--action edited` sends the diff to the planner as annotated feedback.
 
-The plan session answers "Continue with plan implementation?" with **no**
-on its own, so planning never starts execution by itself.
+The plan session (also `plan-review`) answers "Continue with plan
+implementation?" with **no** on its own, so planning never starts
+execution by itself.
 
 ## How Prompts Reach the Driver
 

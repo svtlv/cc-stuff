@@ -30,9 +30,10 @@ models.
 
    Do not offer to continue without the tools: the runner cannot start, and
    a config that calls the router fails on the first task.
-3. **`setup_incomplete` is not empty** (no classifier key, or a missing
+3. **`setup_incomplete` is not empty** (no classifier key, a missing
    repository config: `.ralphex/config`, `.agrouter/config` or
-   `.autopilot/config`). Mention each item in one line and ask: run setup now
+   `.autopilot/config`, or a runner older than v1.7.0-windows.4, which has
+   no plan review: `cli.plan_review: false`). Mention each item in one line and ask: run setup now
    (Recommended), or continue with the current settings. Without a reply
    within the `preflight` response time (10 min, `response-times.md`),
    continue with the current settings and log it; setup needs
