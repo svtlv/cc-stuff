@@ -4,7 +4,7 @@ description: This skill should be used when the user runs "/autopilot-run" or "$
 argument-hint: "<plan file> [-- extra runner flags such as --tasks-only]"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, Agent, CronCreate, CronDelete
 metadata:
-  version: "0.6.0"
+  version: "0.7.0"
 ---
 
 # Autopilot Run
@@ -89,8 +89,9 @@ State what will run in one short table: plan, where (`place`: new
 worktree, this worktree or this checkout), branch (current or the one the
 runner will create), setup (Claude or Codex, from `cli_config.executor`; a
 `--codex` flag switches to Codex), models from `cli_config.effective`,
-phases (Codex: no external review), extra flags, and publish (`[publish]
-mode`: push and pull request into the start branch by default). Starting is an outward action (it commits on a branch, may run for
+phases (Codex: no external review), extra flags, and publish (push and
+pull request into the start branch, unless the user asked otherwise in
+the chat). Starting is an outward action (it commits on a branch, may run for
 hours and spends model usage), so ask unless the user already asked to
 start right away or the `autopilot` skill obtained consent. Offer three
 answers: start, **change the plan first** (revision rounds per

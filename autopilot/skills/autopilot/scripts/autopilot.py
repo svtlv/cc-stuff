@@ -8,7 +8,7 @@ detects prompts, accepts answers through an inbox, restarts failed runs and
 reports progress as compact JSON.
 
 Commands:
-  doctor [--json] [--latest]          tools, versions, configs, repo state
+  doctor [--json] [--latest|--updates|--skip-updates]  tools, versions, updates, configs
   plan  --desc TEXT [-- ARGS]         start interactive plan creation (with its plan review)
   plan-review PLAN [-- ARGS]          start the runner's review of an existing plan file
   run   --plan PATH [-- ARGS]         start plan execution with auto-restart
@@ -644,24 +644,11 @@ def autopilot_template():
     lines = ['# autopilot repository config: committed, shared by everyone who runs autopilot here.',
              '# Layering: built-in defaults < ~/.config/autopilot/config (AUTOPILOT_CONFIG)',
              '# < this file < AUTOPILOT_TIMEOUTS. Comments must be on their own lines.',
-             '', '[review]',
-             '# plan: the recommended answer to the runner\'s "Review the plan before',
-             '# implementation?". The runner always asks; autopilot takes this answer when',
-             '# review_pick passes without a reply.',
-             '#   auto  External reviewer (the runner\'s external review tool, Codex in the',
-             '#         Claude setup); Same agent when the runner does not offer it',
-             '#   codex | claude  the reviewer that runs that CLI (External reviewer is Codex,',
-             '#         Same agent is the executor)',
-             '#   off   recommend Skip review (the review is still offered)',
-             '# plan = auto',
-             '', '[publish]',
-             '# mode: what happens to the run branch before the final report',
-             '#   pr    push it and open a pull request against the branch the run started from',
-             '#         (the default branch when that branch is not on the remote)',
-             '#   push  push only;  off  keep it local',
-             '# mode = pr',
-             '# draft: open the pull request as a draft (always when the run did not finish)',
-             '# draft = false',
+             '', '[updates]',
+             '# check: how often the skills look for newer ralphex.windows and agrouter',
+             '# releases on GitHub at their start and offer an upgrade (24h, 1h, 0 = every',
+             '# start, off = never)',
+             '# check = 24h',
              '', '[worktree]',
              '# path: where a new worktree for a run goes (the workspaces layout by default).',
              '#   {parent} the folder that holds this repository, {repo} its name,',
@@ -688,6 +675,10 @@ def fmt_duration(seconds):
     return f'{seconds}s'
 
 
+# sections autopilot no longer reads: the chat decides these per run
+OBSOLETE_SECTIONS = ('review', 'publish')
+
+
 def cmd_config_init(args):
     """Write a tool's full commented default config into the repository (nothing active yet).
 
@@ -700,7 +691,8 @@ def cmd_config_init(args):
         emit({'ok': True, 'tool': args.tool, 'file': str(dest), 'created': False,
               'state': state})
         return
-    kept = active_with_comments(dest.read_text(encoding='utf-8')) \
+    kept = [item for item in active_with_comments(dest.read_text(encoding='utf-8'))
+            if not (args.tool == 'autopilot' and item[0] in OBSOLETE_SECTIONS)] \
         if state == 'partial' and args.merge else []
     text = comment_out_values({'ralphex': runner_template, 'agrouter': router_template,
                                'autopilot': autopilot_template}[args.tool]())
@@ -797,12 +789,12 @@ def merged(paths):
     return data
 
 
-def latest_release(repo, contains=None):
+def latest_release(repo, contains=None, timeout=10):
     url = f'https://api.github.com/repos/{repo}/releases?per_page=10'
     req = urllib.request.Request(url, headers={'User-Agent': 'autopilot-skill',
                                                'Accept': 'application/vnd.github+json'})
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             for rel in json.loads(resp.read().decode()):
                 tag = rel.get('tag_name', '')
                 if rel.get('draft') or (contains and contains not in tag):
@@ -819,6 +811,134 @@ def tool_info(name):
         return {'path': None, 'version': None}
     code, out = run_quiet([path, '--version'])
     return {'path': path, 'version': out.splitlines()[0] if out else None}
+
+
+# where the newest releases come from: doctor key -> (GitHub repository, tag filter)
+UPDATE_SOURCES = {'cli': ('svtlv/ralphex', '-windows'), 'router': ('svtlv/agrouter', None)}
+UPDATE_INTERVAL = '24h'   # [updates] check: how long a lookup stays fresh; off disables it
+UPDATE_RETRY = 3600       # a failed lookup (offline, GitHub limit) is retried after an hour
+
+
+def install_via(path):
+    """How a tool was installed, from where it lives: brew, go, script or None (unknown)."""
+    if not path:
+        return None
+    where, real = Path(path), str(Path(path).resolve()).replace('\\', '/')
+    if '/Caskroom/' in real or '/Cellar/' in real or str(where).startswith(
+            ('/opt/homebrew/', '/home/linuxbrew/')):
+        return 'brew'
+    gobin = os.environ.get('GOBIN') or Path(os.environ.get('GOPATH') or Path.home() / 'go') / 'bin'
+    if where.parent == Path(gobin):
+        return 'go'
+    if where.parent == Path.home() / '.local/bin':
+        return 'script'
+    return None
+
+
+def other_copies(name, first):
+    """Other copies of a command later on PATH: an upgrade must replace the first one."""
+    seen, out = {os.path.normcase(str(Path(first).resolve()))} if first else set(), []
+    for folder in os.environ.get('PATH', '').split(os.pathsep):
+        found = folder and shutil.which(name, path=folder)
+        key = found and os.path.normcase(str(Path(found).resolve()))
+        if found and key not in seen:
+            seen.add(key)
+            out.append(found)
+    return out
+
+
+def version_tag(text):
+    """'v1.7.0-windows.4' from 'ralphex v1.7.0-windows.4'; the text itself when no version is in it."""
+    m = re.search(r'v?\d+\.\d+\.\d+(?:-[\w.]+)?', text or '')
+    return m.group(0) if m else text
+
+
+def update_cache_path():
+    return state_root() / 'updates.json'
+
+
+def read_update_cache():
+    try:
+        data = json.loads(update_cache_path().read_text(encoding='utf-8'))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def write_update_cache(data):
+    path = update_cache_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(f'.{os.getpid()}.tmp')
+        tmp.write_text(json.dumps(data, indent=1), encoding='utf-8')
+        os.replace(tmp, path)
+    except OSError:
+        pass  # the check still works, it just runs again next time
+
+
+def fetch_latest():
+    """{'cli': tag|None, 'router': tag|None}; AUTOPILOT_LATEST="cli=v1,router=v2" stands in for GitHub."""
+    fake = os.environ.get('AUTOPILOT_LATEST')
+    if fake is not None:
+        pairs = dict(item.split('=', 1) for item in fake.split(',') if '=' in item)
+        return {key: pairs.get(key) or None for key in UPDATE_SOURCES}
+    found = {}
+    threads = [threading.Thread(target=lambda k=k, r=r, c=c: found.__setitem__(
+        k, latest_release(r, c, timeout=5)), daemon=True) for k, (r, c) in UPDATE_SOURCES.items()]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(12)
+    return {key: found.get(key) for key in UPDATE_SOURCES}
+
+
+def latest_versions(force=False):
+    """(latest tags, how they were got: fresh / cached / off, skipped tags per tool).
+
+    The lookup runs at most once per [updates] check interval (24h by default), so each start
+    of a skill costs no GitHub request; force (doctor --latest) always asks GitHub.
+    """
+    cache = read_update_cache()
+    skipped = cache.get('skipped') or {}
+    try:
+        interval = parse_duration(autopilot_config('updates').get('check', UPDATE_INTERVAL))
+    except ValueError:
+        interval = parse_duration(UPDATE_INTERVAL)
+    if interval is None and not force:
+        return {}, 'off', skipped
+    latest = cache.get('latest') or {}
+    complete = all(latest.get(key) for key in UPDATE_SOURCES)
+    fresh_for = interval if complete else min(interval or 0, UPDATE_RETRY)
+    if not force and latest and time.time() - cache.get('checked', 0) < fresh_for:
+        return latest, 'cached', skipped
+    latest = fetch_latest()
+    cache.update(checked=time.time(), latest=latest)
+    write_update_cache(cache)
+    return latest, 'fresh', skipped
+
+
+def pending_updates(info, latest):
+    """Installed tools with a newer release: one entry per tool, newest tag and how to reach it."""
+    out = []
+    for key, name in (('cli', info['cli'].get('name') or CLI_NAMES[0]), ('router', ROUTER)):
+        tool, tag = info.get(key) or {}, latest.get(key)
+        have, want = runner_version(tool.get('version')), runner_version(tag)
+        if not tool.get('path') or have is None or want is None or want <= have:
+            continue
+        out.append({'tool': name, 'key': key, 'installed': version_tag(tool['version']),
+                    'latest': tag, 'path': tool['path'], 'via': install_via(tool['path']),
+                    'other_copies': other_copies(name, tool['path'])})
+    return out
+
+
+def skip_updates(updates):
+    """Do not offer these releases again; a newer release is offered as usual."""
+    cache = read_update_cache()
+    skipped = cache.get('skipped') or {}
+    for item in updates:
+        skipped[item['tool']] = item['latest']
+    cache['skipped'] = skipped
+    write_update_cache(cache)
 
 
 WRAPPER_MARKER = 'autopilot-wrapper'
@@ -1304,14 +1424,15 @@ def codex_fallback_args(cli_args):
     return result + ['--codex', '--plan-model=:', '--task-model=:', '--review-model=:']
 
 
-def plan_review_pick(pref, executor, offered, external_tool='codex', revised=0):
+def plan_review_pick(executor, offered, external_tool='codex', revised=0):
     """The answer to the runner's "Review the plan before implementation?" when nobody replies.
 
     The runner asks the question itself (External reviewer, Same agent, Skip review) and
-    autopilot relays it; this recommendation only keeps an unattended flow moving. `offered`
-    maps each reviewer option to (usable, reason). The configured reviewer comes first, then
-    the other one, so a missing reviewer downgrades the review instead of dropping it. After a
-    round that revised the plan, skip: one review round is enough without the user.
+    autopilot relays it; this recommendation only keeps an unattended flow moving, and the
+    user picks another reviewer (or none) in the chat. `offered` maps each reviewer option to
+    (usable, reason). The external reviewer comes first, then the same agent, so a missing
+    reviewer downgrades the review instead of dropping it. After a round that revised the
+    plan, skip: one review round is enough without the user.
     """
     options = [{'option': name, 'usable': offered.get(name, (False,))[0],
                 'reason': offered.get(name, (False, None))[1]}
@@ -1323,12 +1444,10 @@ def plan_review_pick(pref, executor, offered, external_tool='codex', revised=0):
 
     if revised:
         return result(REVIEW_SKIP, 'one review round already revised the plan')
-    if pref == 'off':
-        return result(REVIEW_SKIP, '[review] plan = off')
-    want = REVIEW_SAME if pref == executor else REVIEW_EXTERNAL
+    want = REVIEW_EXTERNAL
     names = {REVIEW_EXTERNAL: f'the external review tool ({external_tool})',
              REVIEW_SAME: f'the same agent ({executor}, read-only)'}
-    for option in (want, REVIEW_SAME if want == REVIEW_EXTERNAL else REVIEW_EXTERNAL):
+    for option in (REVIEW_EXTERNAL, REVIEW_SAME):
         ok, why = offered.get(option, (False, 'not offered'))
         if ok:
             if option == want:
@@ -1374,14 +1493,13 @@ def review_capability(repo, cfg=None):
         code = {'tool': 'custom', 'usable': ok, 'reason': None if ok else 'custom script missing'}
     else:
         code = {'tool': 'none', 'usable': False, 'reason': 'external review is off'}
-    pref = autopilot_config('review').get('plan', 'auto')
     usable = {'codex': (codex_ok, codex_why), 'claude': (claude_ok, claude_why)}
     # the runner's plan review: External reviewer is its external review tool (never under the
     # Codex executor), Same agent is the planner executor, read-only
     offered = {REVIEW_EXTERNAL: (code['usable'], code['reason']),
                REVIEW_SAME: usable[executor]}
-    plan = {'setting': pref, 'by': 'runner', 'external_tool': code['tool']}
-    plan.update(plan_review_pick(pref, executor, offered, code['tool']))
+    plan = {'by': 'runner', 'external_tool': code['tool']}
+    plan.update(plan_review_pick(executor, offered, code['tool']))
     fallback = 'codex' if executor == 'claude' and not claude_ok and codex_ok else None
     run_ok, run_why = usable[executor]
     if executor == 'codex' and run_ok:
@@ -1478,9 +1596,12 @@ def missing_repo_configs(repo, cfg):
                           'runner would stop on a Codex limit instead of waiting; set it in '
                           '.agrouter/config')
     own = Path(repo) / '.autopilot/config'
-    if own.exists() and not any(sec == 'review' and k == 'plan'
-                                for sec, k, _ in ini_active(own.read_text(encoding='utf-8'))):
-        issues.append('the autopilot config (.autopilot/config) does not set [review] plan')
+    old = sorted({f'[{sec}] {k}' for sec, k, _ in ini_active(own.read_text(encoding='utf-8'))
+                  if sec in OBSOLETE_SECTIONS}) if own.exists() else []
+    if old:
+        issues.append(f"the autopilot config (.autopilot/config) sets {', '.join(old)}, which "
+                      'autopilot no longer reads (plan review is always auto, runs always open '
+                      'a pull request; change either in the chat): remove them')
     return issues
 
 
@@ -1534,9 +1655,23 @@ def cmd_doctor(args):
         'key_source': 'config' if key_in_cfg else (
             'env' if os.environ.get('AGROUTER_CLASSIFIER_API_KEY') else None),
     }
-    if args.latest:
-        info['latest'] = {'cli': latest_release('svtlv/ralphex', '-windows'),
-                          'router': latest_release('svtlv/agrouter')}
+    for key in ('cli', 'router'):
+        if info[key]['path']:
+            info[key]['via'] = install_via(info[key]['path'])
+    if args.latest or args.updates or args.skip_updates:
+        if info['host']['network_disabled'] and not args.latest:
+            info['updates_check'] = 'offline'
+        else:
+            latest, how, skipped = latest_versions(force=args.latest)
+            info['updates_check'] = how if any(latest.values()) or how == 'off' else 'offline'
+            if how != 'off':
+                info['latest'] = latest
+            updates = pending_updates(info, latest)
+            if args.skip_updates:
+                skip_updates(updates)
+                skipped = {u['tool']: u['latest'] for u in updates}
+            info['updates'] = [u for u in updates if skipped.get(u['tool']) != u['latest']]
+            info['updates_skipped'] = [u for u in updates if skipped.get(u['tool']) == u['latest']]
     missing = []
     if not cli:
         missing.append('plan runner (ralphex.windows) is not installed')
@@ -2474,7 +2609,8 @@ class Supervisor:
         """Context for one of the runner's plan review questions, or None for other prompts.
 
         `default` is the answer taken when the response time passes with no recommendation
-        registered: the [review] plan reviewer for the first round (skip after a revision),
+        registered: the external reviewer (else the same agent) for the first round, skip
+        after a revision,
         and the CRITICAL and MAJOR findings for the findings question.
         """
         if self.meta['kind'] != 'plan' or prompt['kind'] not in ('question', 'choice'):
@@ -2486,7 +2622,6 @@ class Supervisor:
             self.state['review_rounds'] = self.state.get('review_rounds', 0) + 1
             gone = 'the runner does not offer it (no external review tool, or the Codex executor)'
             pick = plan_review_pick(
-                autopilot_config('review').get('plan', 'auto'),
                 self.meta.get('executor') or 'claude',
                 {REVIEW_EXTERNAL: (REVIEW_EXTERNAL in offered, None if REVIEW_EXTERNAL in offered
                                    else gone),
@@ -4125,8 +4260,7 @@ def cmd_publish(args):
     st = read_json(sdir / 'state.json', {}) or {}
     if meta.get('kind') != 'run':
         die('publish takes a run session')
-    mode = args.mode or autopilot_config('publish').get('mode', 'pr')
-    draft_cfg = autopilot_config('publish').get('draft', 'false').lower() == 'true'
+    mode = args.mode or 'pr'
     branch, folder, base, base_why = run_work(meta)
     if args.base:
         base, base_why = args.base, 'chosen with --base'
@@ -4141,14 +4275,14 @@ def cmd_publish(args):
                 else f'Pushed {branch} to {out.get("remote")}' if out['pushed']
                 else f'Did not publish {branch}')
         log_decision(sdir, kind='decision', by='autopilot', text=text,
-                     reason=skipped or (f'[publish] mode = {mode}; base: {base_why}'))
+                     reason=skipped or (f'publish mode {mode}; base: {base_why}'))
         emit(out)
 
     def git(*argv, timeout=60):
         return run_quiet(['git', *argv], cwd=folder, timeout=timeout)
 
     if mode == 'off':
-        return finish('[publish] mode = off')
+        return finish('publish --mode off: the user asked to keep the branch local')
     if run_quiet(['git', 'rev-parse', '--verify', '-q', f'refs/heads/{branch}'],
                  cwd=meta['repo'])[0] != 0:
         return finish(f'the run made no branch {branch}')
@@ -4179,7 +4313,7 @@ def cmd_publish(args):
     _, url = git('config', '--get', f'remote.{remote}.url')
     host = remote_host(url)
     title = args.title or plan_title(st.get('plan_file') or meta['target']) or branch
-    draft = args.draft or draft_cfg or st.get('status') != 'done'
+    draft = args.draft or st.get('status') != 'done'
     body = Path(args.body_file).read_text(encoding='utf-8') if args.body_file else \
         f'Implements `{Path(meta["target"]).name}` (autopilot run {sdir.name}).\n'
     if host == 'github' and shutil.which('gh'):
@@ -4364,6 +4498,10 @@ def main(argv=None):
     s = sub.add_parser('doctor')
     s.add_argument('--json', action='store_true')
     s.add_argument('--latest', action='store_true', help='look up latest releases on GitHub')
+    s.add_argument('--updates', action='store_true',
+                   help='report newer releases of the runner and router (looked up once a day)')
+    s.add_argument('--skip-updates', action='store_true',
+                   help='stop offering the releases --updates reports now')
     s.set_defaults(fn=cmd_doctor)
     s = sub.add_parser('plan')
     s.add_argument('--desc', required=True)
@@ -4482,7 +4620,7 @@ def main(argv=None):
     s = sub.add_parser('publish')
     s.add_argument('session', help='the run session')
     s.add_argument('--mode', choices=['pr', 'push', 'off'],
-                   help='default: [publish] mode in the autopilot config, else pr')
+                   help='default pr; push or off only when the user asks for it in the chat')
     s.add_argument('--base', help='target branch (default: the branch the run started from)')
     s.add_argument('--title')
     s.add_argument('--body-file', help='pull request description (Markdown)')

@@ -69,7 +69,7 @@ a waiting chat costs no tokens.
 | You don't answer | Each question has a recommended answer, chosen with a reason, and a response time that fits it: 10 min for planner questions, 30 min for the plan draft, 60 min to decide whether to implement (reminders before the long ones; say "wait" for more). Then the recommendation is taken and the work continues to the end. Times are configurable in the repository's `.autopilot/config` (committed) or your `~/.config/autopilot/config`. Installing software and credentials always wait for you. |
 | You ask about or change the run mid-way | The chat that started it stays in charge: it answers from the log and the branch's commits while the run continues. Code, plan or model changes go through a safe point: "pause after this task", change, "resume". |
 | The chat hits its own usage limit, or you open a new chat | The run continues by itself. When no chat has watched for 10 minutes and there is news, the supervisor types a wake line into the chat's terminal tab (Orca tab, tmux, WezTerm, kitty, iTerm2, or your own `[wake] command`), which works for Claude Code, Codex or any other agent CLI; otherwise it shows a desktop notification. The chat then posts the updates you missed. |
-| Run finished | Autopilot pushes the run branch and opens a pull request into the branch the run started from (for example `master` for a worktree run planned on `master`), or into the default branch when that branch is not on the remote. An open pull request is reused, and a run that did not finish opens a draft. It needs `gh` or `glab`; without them it pushes only. Set `[publish] mode = push` or `off` in `.autopilot/config` to change this. |
+| Run finished | Autopilot pushes the run branch and opens a pull request into the branch the run started from (for example `master` for a worktree run planned on `master`), or into the default branch when that branch is not on the remote. An open pull request is reused, and a run that did not finish opens a draft. It needs `gh` or `glab`; without them it pushes only. No config changes this: tell the chat "push only", "keep it local" or "open a draft" during the flow. |
 | Flow ends (any outcome) | A short report in two main parts: first every decision made without you (with why and how to change it), then the goal and what was done. Open items follow only when you must act. Saved next to the session state. |
 
 In hosts that notify on background commands (Claude Code) the monitor runs
@@ -97,6 +97,10 @@ The other three skills check for ralphex.windows and agrouter first. When
 either is missing, they ask to run setup and continue your original request
 afterwards; nothing starts without both tools. A missing key or repository
 config gets an offer to run setup, with the option to continue anyway.
+A newer ralphex.windows or agrouter release gets an offer to upgrade (setup
+`tools`), continue, or skip that version. The lookup runs at most once a
+day; set `[updates] check` in `.autopilot/config` to change it (`off`
+disables it).
 
 Run `/autopilot:autopilot-setup` (or `$autopilot-setup`) directly. It walks through:
 
@@ -109,8 +113,9 @@ Run `/autopilot:autopilot-setup` (or `$autopilot-setup`) directly. It walks thro
    the repository.
 4. **Repository config** — executor (Claude Code or Codex), model selection
    (full routing, pinned model with routed effort, fixed models, or no
-   router), project docs for routing, external review, plan review, and
-   limit waiting. Setup always writes full configs for all three tools, so
+   router), project docs for routing, external review and limit waiting.
+   The plan review and publishing are not settings: you steer them in the
+   chat. Setup always writes full configs for all three tools, so
    a clone works for a user with no global config:
 
    ```
@@ -118,7 +123,7 @@ Run `/autopilot:autopilot-setup` (or `$autopilot-setup`) directly. It walks thro
    .ralphex/scripts/codex-agrouter.sh  Codex through agrouter
    .agrouter/config                    router template: classifier provider, Codex quota prefix,
                                        disabled CLIs, long-context limits for large doc sets
-   .autopilot/config                   autopilot template: recommended plan review, response times
+   .autopilot/config                   autopilot template: update check, worktree path, response times
    ```
    **Note:** on Windows the wrapper is `codex-agrouter.cmd` plus
    `codex-agrouter.py`. These files are safe to commit; the classifier key

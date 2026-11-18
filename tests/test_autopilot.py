@@ -909,7 +909,7 @@ class AutopilotDriver(unittest.TestCase):
         (self.repo / '.ralphex').mkdir()
         (self.repo / '.ralphex/config').write_text('executor = codex\n')
         (self.repo / '.autopilot').mkdir()
-        (self.repo / '.autopilot/config').write_text('[review]\nplan = auto\n')
+        (self.repo / '.autopilot/config').write_text('[timeouts]\ndecide = 1h\n')
         env = dict(self.env, FAKE_CLAUDE_LOGIN='0', FAKE_MODE='env')
         cap = self.drive('doctor', '--json', env=env)['reviews']
         self.assertTrue(cap['codex']['usable'])
@@ -1267,7 +1267,6 @@ class Reconfigure(unittest.TestCase):
             '# agrouter embedded defaults\n[agrouter]\nclassifier_provider = typesafe\n')
         (self.repo / '.autopilot').mkdir()
         (self.repo / '.autopilot/config').write_text(autopilot.autopilot_template())
-        self.ap('config-set', '.autopilot/config', 'plan', '--section', 'review', '--value', 'auto')
         cfg = self.repo / '.ralphex/config'
         cfg.write_text('# ralphex configuration\n' + cfg.read_text())
         self.assertEqual(self.ap('config-summary')['issues'], [])
@@ -1310,12 +1309,12 @@ class Reconfigure(unittest.TestCase):
         for key in autopilot.POLICY:
             self.assertIn(f'# {key} = ', text)
         self.assertIn('# decide.remind = 15m', text)
-        self.ap('config-set', '.autopilot/config', 'plan', '--section', 'review', '--value', 'auto')
         self.ap('config-set', '.autopilot/config', 'decide', '--section', 'timeouts', '--value', '2h')
         policy = self.ap('policy')
         self.assertEqual(policy['policy']['decide']['timeout'], 7200)
         self.assertEqual([Path(p).resolve() for p in policy['source']], [cfg.resolve()])
-        self.assertIn('[review]\n', cfg.read_text())
+        self.assertNotIn('[review]', cfg.read_text())
+        self.assertNotIn('[publish]', cfg.read_text())
 
     def test_merge_upgrades_a_partial_config_and_keeps_its_values(self):
         own = self.repo / '.autopilot/config'
@@ -1325,16 +1324,19 @@ class Reconfigure(unittest.TestCase):
         self.assertEqual(autopilot.config_state(own, 'autopilot'), 'partial')
         issues = self.ap('config-summary')['issues']
         self.assertTrue(any('(.autopilot/config) is partial' in i for i in issues), issues)
+        self.assertTrue(any('[review] plan, which autopilot no longer reads' in i
+                            for i in issues), issues)
         kept = self.ap('config-init', '--tool', 'autopilot')
         self.assertEqual((kept['created'], kept['state']), (False, 'partial'))
         out = self.ap('config-init', '--tool', 'autopilot', '--merge')
-        self.assertEqual(out['merged'], ['[review] plan', '[timeouts] decide'])
+        # the obsolete [review] key is dropped: the chat decides the plan review now
+        self.assertEqual(out['merged'], ['[timeouts] decide'])
         text = own.read_text()
         self.assertEqual(autopilot.config_state(own, 'autopilot'), 'full')
-        self.assertIn('# the team wants a second model on every plan\nplan = codex\n', text)
+        self.assertNotIn('plan = codex', text)
         self.assertIn('# decide: ', text)
         self.assertEqual(list(autopilot.ini_active(text)),
-                         [('review', 'plan', 'codex'), ('timeouts', 'decide', '2h')])
+                         [('timeouts', 'decide', '2h')])
         backup = Path(out['backup'])
         self.assertIn('decide = 2h', backup.read_text())
         self.assertFalse(backup.resolve().is_relative_to(self.repo.resolve()))
@@ -1511,30 +1513,28 @@ class StepsSummary(unittest.TestCase):
 
 
 class PlanReviewPick(unittest.TestCase):
-    def pick(self, pref, external=True, same=True, executor='claude', revised=0):
+    def pick(self, external=True, same=True, executor='claude', revised=0):
         offered = {'External reviewer': (external, None if external else 'codex is not installed'),
                    'Same agent': (same, None if same else 'claude is logged out')}
-        return autopilot.plan_review_pick(pref, executor, offered, revised=revised)['recommended']
+        return autopilot.plan_review_pick(executor, offered, revised=revised)['recommended']
 
     def test_recommendation_keeps_the_flow_moving_with_the_best_usable_review(self):
-        self.assertEqual(self.pick('auto'), 'External reviewer')
-        self.assertEqual(self.pick('auto', external=False), 'Same agent')
-        self.assertEqual(self.pick('codex'), 'External reviewer')
-        self.assertEqual(self.pick('claude'), 'Same agent')
-        self.assertEqual(self.pick('claude', same=False), 'External reviewer')
+        self.assertEqual(self.pick(), 'External reviewer')
+        self.assertEqual(self.pick(external=False), 'Same agent')
         # the Codex executor: the runner offers no External reviewer
-        self.assertEqual(self.pick('claude', external=False, executor='codex'), 'Same agent')
-        self.assertEqual(self.pick('auto', external=False, same=False), 'Skip review')
-        self.assertEqual(self.pick('off'), 'Skip review')
-        self.assertEqual(self.pick('auto', revised=1), 'Skip review')
+        self.assertEqual(self.pick(external=False, executor='codex'), 'Same agent')
+        self.assertEqual(self.pick(external=False, same=False), 'Skip review')
+        self.assertEqual(self.pick(revised=1), 'Skip review')
 
-    def test_no_config_recommends_the_external_review(self):
-        with unittest.mock.patch.object(autopilot, 'autopilot_config', return_value={}), \
+    def test_the_external_review_is_recommended_whatever_the_config_says(self):
+        with unittest.mock.patch.object(autopilot, 'autopilot_config',
+                                        return_value={'plan': 'off'}), \
                 unittest.mock.patch.object(autopilot, 'codex_status', return_value=(True, None)), \
                 unittest.mock.patch.object(autopilot, 'claude_status', return_value=(True, None)):
             plan = autopilot.review_capability('/nonexistent', {})['plan_review']
-        self.assertEqual((plan['setting'], plan['recommended'], plan['external_tool']),
-                         ('auto', 'External reviewer', 'codex'))
+        self.assertNotIn('setting', plan)
+        self.assertEqual((plan['recommended'], plan['external_tool']),
+                         ('External reviewer', 'codex'))
 
     def test_runner_version_gates_the_native_review(self):
         self.assertEqual(autopilot.runner_version('ralphex v1.7.0-windows.4'), (1, 7, 0, 4))
@@ -1543,6 +1543,89 @@ class PlanReviewPick(unittest.TestCase):
         self.assertTrue(autopilot.runner_version('ralphex v1.8.0') >= autopilot.PLAN_REVIEW_MIN)
         self.assertFalse(autopilot.runner_version('ralphex v1.7.0-windows.3')
                          >= autopilot.PLAN_REVIEW_MIN)
+
+
+class ToolUpdates(unittest.TestCase):
+    """Newer runner and router releases offered at the start, looked up once a day."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        patcher = unittest.mock.patch.dict(os.environ, {
+            'AUTOPILOT_STATE_DIR': self.tmp.name, 'AUTOPILOT_CONFIG': '/none'})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop('AUTOPILOT_LATEST', None)
+        self.config = unittest.mock.patch.object(autopilot, 'autopilot_config', return_value={})
+        self.config.start()
+        self.addCleanup(self.config.stop)
+
+    def info(self, cli='ralphex v1.7.0-windows.4', router='v0.6.0'):
+        return {'cli': {'path': '/x/ralphex.windows', 'version': cli, 'name': 'ralphex.windows'},
+                'router': {'path': '/x/agrouter' if router else None, 'version': router}}
+
+    def test_only_older_installed_tools_get_an_update(self):
+        latest = {'cli': 'v1.7.0-windows.5', 'router': 'v0.6.0'}
+        updates = autopilot.pending_updates(self.info(), latest)
+        self.assertEqual([(u['tool'], u['installed'], u['latest']) for u in updates],
+                         [('ralphex.windows', 'v1.7.0-windows.4', 'v1.7.0-windows.5')])
+        self.assertEqual(autopilot.pending_updates(self.info(cli='ralphex v1.8.0'), latest), [])
+        self.assertEqual(autopilot.pending_updates(self.info(cli='ralphex (devel)'), latest), [])
+        self.assertEqual(autopilot.pending_updates(self.info(router=None),
+                                                   {'cli': None, 'router': 'v9.0.0'}), [])
+
+    def test_lookup_is_cached_and_retried_sooner_after_a_failure(self):
+        with unittest.mock.patch.object(autopilot, 'fetch_latest',
+                                        return_value={'cli': 'v2.0.0', 'router': 'v1.0.0'}) as fetch:
+            self.assertEqual(autopilot.latest_versions()[1], 'fresh')
+            self.assertEqual(autopilot.latest_versions()[1], 'cached')
+            self.assertEqual(autopilot.latest_versions(force=True)[1], 'fresh')
+            self.assertEqual(fetch.call_count, 2)
+        with unittest.mock.patch.object(autopilot, 'fetch_latest',
+                                        return_value={'cli': None, 'router': None}) as fetch:
+            autopilot.latest_versions(force=True)
+            self.assertEqual(autopilot.latest_versions()[1], 'cached')
+            cache = autopilot.read_update_cache()
+            cache['checked'] -= autopilot.UPDATE_RETRY + 1
+            autopilot.write_update_cache(cache)
+            self.assertEqual(autopilot.latest_versions()[1], 'fresh')
+            self.assertEqual(fetch.call_count, 2)
+
+    def test_check_off_asks_nothing(self):
+        self.config.stop()
+        with unittest.mock.patch.object(autopilot, 'autopilot_config', return_value={'check': 'off'}), \
+                unittest.mock.patch.object(autopilot, 'fetch_latest') as fetch:
+            self.assertEqual(autopilot.latest_versions(), ({}, 'off', {}))
+            fetch.assert_not_called()
+        self.config.start()
+
+    def test_skipped_release_is_not_offered_but_a_newer_one_is(self):
+        bin_dir = Path(self.tmp.name) / 'bin'
+        bin_dir.mkdir()
+        python_tool(bin_dir / 'agrouter', 'print("v0.6.0")\n')
+        env = dict(os.environ, AUTOPILOT_LATEST='cli=v99.0.0-windows.1,router=v99.0.0',
+                   PATH=os.pathsep.join([str(bin_dir), system_tool_path()]))
+        def doctor(*flags):
+            out = subprocess.run([sys.executable, str(autopilot.SCRIPT), 'doctor', '--json', *flags],
+                                 capture_output=True, text=True, env=env, check=True).stdout
+            return json.loads(out)
+        first = doctor('--updates')
+        self.assertIn('agrouter', [u['tool'] for u in first['updates']])
+        doctor('--skip-updates')
+        again = doctor('--updates')
+        self.assertEqual((again['updates'], again['updates_check']), ([], 'cached'))
+        env['AUTOPILOT_LATEST'] = 'cli=v99.0.0-windows.1,router=v99.1.0'
+        newer = doctor('--latest')
+        self.assertEqual([u['latest'] for u in newer['updates']], ['v99.1.0'])
+
+    def test_install_method_from_the_path(self):
+        self.assertEqual(autopilot.install_via('/opt/homebrew/bin/ralphex.windows'), 'brew')
+        self.assertEqual(autopilot.install_via(str(Path.home() / '.local/bin/ralphex.windows')),
+                         'script')
+        with unittest.mock.patch.dict(os.environ, {'GOBIN': '/gobin'}):
+            self.assertEqual(autopilot.install_via('/gobin/agrouter'), 'go')
+        self.assertIsNone(autopilot.install_via('/usr/bin/agrouter'))
+        self.assertEqual(autopilot.version_tag('ralphex v1.7.0-windows.4'), 'v1.7.0-windows.4')
 
 
 class ImplementationPlace(unittest.TestCase):
@@ -1604,7 +1687,7 @@ class ImplementationPlace(unittest.TestCase):
         plan.parent.mkdir(parents=True)
         plan.write_text('### Task 1: a\n- [ ] a\n')
         (self.repo / '.autopilot').mkdir()
-        (self.repo / '.autopilot/config').write_text('[publish]\nmode = pr\n')
+        (self.repo / '.autopilot/config').write_text('[timeouts]\ndecide = 1h\n')
         (self.repo / 'notes.txt').write_text('wip')
         env = {'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@t',
                'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@t'}
@@ -1763,7 +1846,10 @@ class Publish(unittest.TestCase):
 
     def test_worktree_run_from_master_opens_a_pr_into_master(self):
         folder = self.work('add-cache')
-        out = self.publish(self.session('master'))
+        # an old [publish] section is ignored: only the chat changes the mode (--mode, --draft)
+        old = Path(self.tmp.name) / 'autopilot.conf'
+        old.write_text('[publish]\nmode = off\ndraft = true\n')
+        out = self.publish(self.session('master'), env=dict(self.env, AUTOPILOT_CONFIG=str(old)))
         self.assertIsNone(out['skipped'], out)
         self.assertEqual((out['branch'], out['base'], out['pushed'], out['commits']),
                          ('add-cache', 'master', True, 1))
@@ -1807,7 +1893,8 @@ class Publish(unittest.TestCase):
         empty = self.publish(self.session('master', plan='docs/plans/x-none.md'))
         self.assertIn('no branch', empty['skipped'])
         off = self.publish(self.session('master'), '--mode', 'off')
-        self.assertEqual((off['pushed'], off['skipped']), (False, '[publish] mode = off'))
+        self.assertEqual((off['pushed'], off['skipped']),
+                         (False, 'publish --mode off: the user asked to keep the branch local'))
 
 
 class ClaudeAvailability(unittest.TestCase):

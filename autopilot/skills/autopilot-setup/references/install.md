@@ -7,8 +7,11 @@ Both tools come from the user's own forks:
 | Plan runner | `github.com/svtlv/ralphex` (branch `windows`) | `ralphex.windows` (`ralphex.windows.exe` on Windows) | `vX.Y.Z-windows.N` |
 | Model router | `github.com/svtlv/agrouter` | `agrouter` | `vX.Y.Z` |
 
-`doctor --json --latest` reports the installed and the newest versions.
-Upgrade when the installed version is older or missing. Show the command and
+`doctor --json --latest` reports the installed and the newest versions;
+`doctor --json --updates` adds the `updates` list the other skills offer at
+their start. Upgrade when the installed version is older or missing. Use
+the method in `via` (`brew`, `go`, `script`), the one that installed the
+copy first on `PATH`; with `via` null, ask the user how they installed it. Show the command and
 get a yes before running any installer.
 
 ## Plan Runner (ralphex.windows)

@@ -4,7 +4,7 @@ description: This skill should be used when the user runs "/autopilot" or "$auto
 argument-hint: "[task description | path to an existing plan file] [-- extra runner flags]"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, Skill, Agent, CronCreate, CronDelete
 metadata:
-  version: "0.6.0"
+  version: "0.7.0"
 ---
 
 # Autopilot
@@ -75,7 +75,8 @@ recovery restarts.
 Before anything else, even before asking for a task, follow
 `references/preflight.md`. When ralphex.windows or agrouter is not
 installed, ask to run the `autopilot-setup` skill and do not continue until
-setup succeeds or the user stops. After setup, resume this flow with the
+setup succeeds or the user stops. When a newer release of either tool
+exists, offer the upgrade first (it is never forced). After setup, resume this flow with the
 original arguments. The planning and run steps below skip their own gate,
 since this one already ran.
 
@@ -141,7 +142,7 @@ the plan now?" --waited <N>` when the timer expired.
 
 Implementing, whether chosen or taken by default, counts as consent to
 start the run and to publish it in Step 6 (push the branch, open a pull
-request, per `[publish] mode`); do not ask again in the run's preflight.
+request); do not ask again in the run's preflight.
 Say this in the question: "When done, I push the branch and open a pull
 request into <base>".
 
@@ -216,9 +217,11 @@ report, whatever the outcome:
    reason (no remote, `gh`/`glab` missing or logged out, push rejected).
    A failed push or pull request never stops the report.
 
-`[publish] mode` in `.autopilot/config` sets `pr` (default), `push` or
-`off`. When the user said "don't push" or "keep it local", use
-`--mode off` and say so.
+A run always opens a pull request; no config changes this. The user
+decides otherwise in the chat at any time during the flow: "push only"
+gives `--mode push`, "don't push" or "keep it local" gives `--mode off`,
+and "open it as a draft" adds `--draft`. Log the choice with `--by user`
+and say so in the report.
 
 After the report, `AP mark-reported <run-session>` and delete the watchdog
 cron job. Always, whatever happened: done, failed after recovery, stopped, or ended

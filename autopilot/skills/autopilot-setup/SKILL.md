@@ -4,7 +4,7 @@ description: This skill should be used when the user runs "/autopilot-setup" or 
 argument-hint: "[tools | key | repo | reconfigure] (default: all, or reconfigure when the repository is already set up)"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion
 metadata:
-  version: "0.6.0"
+  version: "0.7.0"
 ---
 
 # Autopilot Setup
@@ -88,9 +88,13 @@ available as `repo` (Stage 4 asks to keep or replace each existing value).
 
 ## Stage 2 — Install or Upgrade
 
-Follow `install.md` for the platform (`doctor.os`). Prefer Homebrew on macOS
-when `brew` exists, the installer script on Linux, the PowerShell installer
-on Windows, and `go install` as the fallback. The router needs Go 1.27+;
+Follow `install.md` for the platform (`doctor.os`). Upgrade a tool the way
+it was installed (`cli.via`, `router.via`: `brew`, `go` or `script`), so
+the copy first on `PATH` changes. For a new install, prefer Homebrew on
+macOS when `brew` exists, the installer script on Linux, the PowerShell
+installer on Windows, and `go install` as the fallback. When
+`doctor --updates` lists `other_copies`, name them and offer to remove the
+older copy, so a `PATH` change later cannot bring it back. The router needs Go 1.27+;
 check `go version` first and offer to install Go when missing.
 
 After installing, rerun `doctor` and confirm the versions. When the command
@@ -171,25 +175,18 @@ value (from `AP config-summary`) as the "keep" option. Ask, in order:
      none. When Codex is configured but not usable, explain that runs skip
      it automatically, and offer to fix it (install, `codex login`) or set
      `none`.
-   - **Plan review**: after ralphex writes the plan, ralphex reviews it
-     read-only (v1.7.0-windows.4 or newer) and always asks which reviewer
-     to use: External reviewer (its external review tool, Codex in the
-     Claude setup; not offered under the Codex executor), Same agent, or
-     Skip review. Autopilot relays the question. This key sets the default
-     answer, taken after the `review_pick` time so the flow never blocks.
-     Offer `auto` (Recommended: External reviewer, or Same agent when
-     ralphex does not offer it), `codex`, `claude` or `off` (Skip review).
-     Write it with
-     `AP config-set .autopilot/config plan --section review --value auto`.
-     Honor a request to skip either model's review. When
-     `cli.plan_review` is false, upgrade ralphex.windows first.
+   - **Plan review**: nothing to configure. Ralphex (v1.7.0-windows.4 or
+     newer) reviews the plan read-only and asks which reviewer to use.
+     Autopilot relays the question and recommends External reviewer (Same
+     agent when ralphex does not offer it); the user picks another in the
+     chat. Say this in one line. When `cli.plan_review` is false, upgrade
+     ralphex.windows first.
 7. **Wait on limits**: wait 15 minutes and retry (Recommended) or stop.
-8. **Publish**: after a run, push the branch and open a pull request into
-   the branch the run started from (Recommended), push only, or keep it
-   local. Write `AP config-set .autopilot/config mode --section publish
-   --value pr|push|off`, and `draft = true` when the team wants drafts.
-   Say what the pull request needs: `gh` (GitHub) or `glab` (GitLab)
-   installed and logged in (`gh auth status`); without it, runs push only.
+8. **Publish**: nothing to configure. A run always pushes its branch and
+   opens a pull request into the branch it started from; the user changes
+   that in the chat during a flow. Say what the pull request needs: `gh`
+   (GitHub) or `glab` (GitLab) installed and logged in (`gh auth status`);
+   without it, runs push only.
 
 Then write the files, explaining each change with `--comment`. Write all
 three configs every time, also when a global config already has the values:
@@ -217,9 +214,9 @@ teammates and CI may have no global config.
    `[cli.<name>] enabled = false` for a missing or unwanted CLI and, when
    the chosen docs exceed about 60 KB in total (sum file sizes), the
    long-context limits ("Large Doc Sets"). Never a key.
-5. Set `[review] plan` (question 6) and `[publish] mode` (question 8) in
-   `.autopilot/config`. Response times
-   (Stage 4b) go there too when the user changes them for this repository.
+5. `.autopilot/config` keeps its template defaults. Response times
+   (Stage 4b), the update check and the worktree path go there when the
+   user changes them for this repository.
 6. Do not edit the root `.gitignore`. The runner writes
    `.ralphex/.gitignore` (`progress/`, `worktrees/`) and the router writes
    `.agrouter/.gitignore` (`logs/`). Commit both.

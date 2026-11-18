@@ -19,10 +19,10 @@ and how costly a wrong default is.
 | `runtime` | Runner prompt during execution (the run is blocked) | 10 min | — | safe answer |
 | `limit` | Long rate limit: switch executor or wait | 30 min | — | recommended (waiting continues meanwhile) |
 | `recovery` | Recovery step that needs a choice | 15 min | — | recommended safe fix |
-| `preflight` | Worktree for a dirty tree, model-spec override, doc drift, active session, incomplete config | 10 min | — | recommended |
+| `preflight` | Worktree for a dirty tree, model-spec override, doc drift, active session, incomplete config, newer tool release (timeout keeps the installed versions) | 10 min | — | recommended |
 | `plan_pick` | Which plan to run when several exist | never | — | waits |
 | `plan_review` | "Any changes?" after plan-only planning | 30 min | — | no changes |
-| `review_pick` | The runner's "Review the plan before implementation?": External reviewer, Same agent or Skip review | 10 min | — | the `[review] plan` reviewer, else the other one (`off`, or after a revision: Skip review) |
+| `review_pick` | The runner's "Review the plan before implementation?": External reviewer, Same agent or Skip review | 10 min | — | External reviewer, else Same agent (after a revision: Skip review) |
 | `review_apply` | The runner's "Which findings should be applied?" | 15 min | — | the findings the agent's assessment accepts; with no recommendation, the CRITICAL and MAJOR ones |
 | `plan_check` | Redesign a plan the runner cannot use (or run one with warnings) | 15 min | — | redesign (or run as is, for minor warnings) |
 | `text` | Free-text prompt without a safe default | never | — | waits |

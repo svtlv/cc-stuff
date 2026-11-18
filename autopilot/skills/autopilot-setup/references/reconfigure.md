@@ -30,8 +30,8 @@ config, applies to every repository), `default` (built in).
 | 10 | Classifier and key | typesafe, key set | global |
 | 11 | Response times | defaults | global |
 | 12 | Tool versions | installed vs latest (`doctor --latest`) | |
-| 13 | Plan review | auto · recommends external (codex, usable) | `.autopilot/config` |
-| 14 | Publish | pr · `gh` logged in | `.autopilot/config` |
+| 13 | Plan review | recommends external (codex, usable) · changed in the chat | |
+| 14 | Publish | pull request · `gh` logged in · changed in the chat | |
 
 List `issues` above the table with the recommended fix (for example doc
 drift → property 4). For a missing repository config ("this repository
@@ -40,8 +40,9 @@ has no router config" or "no autopilot config"), recommend writing it:
 Stage 4 steps 4–5. For a partial one ("is partial"), recommend
 `AP config-init --tool <tool> --merge`: it keeps every current value and
 its comments, and backs up the old file. A missing
-`[agrouter] classifier_provider`, `[review] plan` or a wrong Codex quota
-prefix is fixed with `config-set`. Copy the values the user has in the
+`[agrouter] classifier_provider` or a wrong Codex quota
+prefix is fixed with `config-set`. Obsolete `[review]` or `[publish]` keys
+are removed with `config-unset` (autopilot no longer reads them). Copy the values the user has in the
 global configs, so the repository keeps working the same way without
 them. Mention the file states from `files`
 (committed / modified / untracked).
@@ -69,8 +70,8 @@ current value as the first option ("keep").
 | 10 | Classifier and key | Setup Stage 3. |
 | 11 | Response times | Setup Stage 4b (this repository's `.autopilot/config`, or the user's global file). |
 | 12 | Tool versions | Setup Stage 2. |
-| 13 | Plan review | `AP config-set .autopilot/config plan --section review --value auto\|off\|codex\|claude`; recommend `auto`. Ralphex always asks which reviewer to use (External reviewer, Same agent, Skip review) and autopilot relays it; this key only sets the default answer, taken after `review_pick` (`plan_review.recommended` shows it now). With `auto`, Same agent replaces External reviewer when ralphex does not offer it (no usable external review tool, or the Codex executor). Show both CLIs' login/routing status and `cli.plan_review`. Honor manual skips (`../../autopilot/references/reviews.md`). |
-| 14 | Publish | `AP config-set .autopilot/config mode --section publish --value pr\|push\|off`; `draft = true\|false`. Check `gh auth status` (or `glab auth status`) for `pr`. |
+| 13 | Plan review | Not a setting. Explain that ralphex asks for the reviewer in every flow and the user answers in the chat; the recommendation (`plan_review.recommended`) is External reviewer, else Same agent. To change what is usable, fix the CLIs: login, routing, `external_review_tool` (property 6), or upgrade for `cli.plan_review`. |
+| 14 | Publish | Not a setting. Runs always open a pull request; the user asks for push only, local only or a draft in the chat. Check `gh auth status` (or `glab auth status`). |
 
 Write with `--comment` explaining each new value, as the first setup did.
 Do not touch keys of properties the user did not pick, even when they look

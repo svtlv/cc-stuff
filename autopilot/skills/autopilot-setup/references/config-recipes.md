@@ -27,7 +27,7 @@ repo/
 │   ├── .gitignore                written by ralphex (progress/, worktrees/)
 │   └── scripts/codex-agrouter.sh Codex through the router, committed, executable
 ├── .autopilot/
-│   └── config                    full commented template: [review] plan, [publish], [timeouts], committed
+│   └── config                    full commented template: [updates], [worktree], [timeouts], committed
 ├── .agrouter/
 │   ├── config                    full commented template: provider, quota prefix, CLIs, limits; no key, committed
 │   └── .gitignore                written by agrouter (logs/)

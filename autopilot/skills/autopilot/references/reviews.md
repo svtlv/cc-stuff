@@ -6,7 +6,7 @@ the main one produced, so it catches what that model missed.
 | Review | Owner | Reviews | Default |
 |---|---|---|---|
 | **External code review** | The runner (ralphex), after the tasks | The branch's code changes | `external_review_tool = codex` in the Claude setup; skipped in the Codex setup |
-| **Plan review** | The runner (ralphex), after it writes the plan file; autopilot relays its questions | The plan, read-only | Ralphex always asks; `[review] plan` (default `auto`) sets the recommended answer, taken after `review_pick` |
+| **Plan review** | The runner (ralphex), after it writes the plan file; autopilot relays its questions | The plan, read-only | Ralphex always asks; the recommended answer is always External reviewer (Same agent when it is not offered), taken after `review_pick`; the user picks another one in the chat |
 
 ## Can Either CLI Review Here?
 
@@ -18,9 +18,9 @@ the main one produced, so it catches what that model missed.
 | `claude.usable`, `claude.reason` | Installed, logged in (`claude auth status --json`), not disabled in the agrouter config |
 | `execution` | Configured executor, whether it is usable, its reason, possible Codex fallback and any configuration blocker |
 | `code_review` | `tool` (`codex`, `custom`, `none`), `usable`, `reason` |
-| `plan_review` | `setting` (`off`, `auto` (default), `codex`, `claude`), `external_tool`, the runner's `options` (`External reviewer`, `Same agent`, `Skip review`, each with `usable` and `reason`) and the `recommended` option with `recommended_why` |
+| `plan_review` | `external_tool`, the runner's `options` (`External reviewer`, `Same agent`, `Skip review`, each with `usable` and `reason`) and the `recommended` option with `recommended_why` |
 
-`auto` picks External reviewer: the runner's external review tool, Codex
+The recommendation is always External reviewer: the runner's external review tool, Codex
 in the Claude setup. Under the Codex executor the runner offers no
 External reviewer, so the plan review is a same-agent review there.
 
@@ -104,13 +104,14 @@ The runner's reviewers:
 The default answer when nobody replies and no recommendation is
 registered (`default on no reply:` in the `next` text):
 
-| Question | `[review] plan` | Default |
-|---|---|---|
-| Which reviewer, round 1 | `auto` (default, also with no config) | `External reviewer`; `Same agent` when it is not offered |
-| Which reviewer, round 1 | `codex` / `claude` | The option that runs that CLI (External reviewer is Codex, Same agent is the executor), else the other one |
-| Which reviewer, round 1 | `off` | `Skip review` (the review is still offered) |
-| Which reviewer, after a revision | any | `Skip review`: one round is enough without the user |
-| Which findings | any | The CRITICAL and MAJOR findings (`1,3`), else `None` |
+| Question | Default |
+|---|---|
+| Which reviewer, round 1 | `External reviewer`; `Same agent` when it is not offered |
+| Which reviewer, after a revision | `Skip review`: one round is enough without the user |
+| Which findings | The CRITICAL and MAJOR findings (`1,3`), else `None` |
+
+No config changes these defaults. The user changes the answer in the chat
+(see the end of this section).
 
 1. Relay the reviewer question (`autopilot-plan` Step 4). Register a
    recommendation with `AP recommend <session> --text "<option>" --reason
@@ -144,8 +145,10 @@ you".
 Honor "skip the plan review": answer `Skip review` and log the user's
 choice. For "skip the Codex review" or "skip the Claude review", do not
 pick the reviewer that runs that CLI. Pick the other reviewer when ralphex
-offers it, else `Skip review`. For no review by default, set `[review] plan =
-off` through setup: `Skip review` is then the default. Keep external code
+offers it, else `Skip review`. A wish such as "no plan reviews in this
+flow" or "always review with Claude" holds for the rest of the flow: keep
+it in mind for every later reviewer question and register it as the
+recommendation with its reason. Keep external code
 review skips separate: `skip-review` controls the runner's external code
 review only.
 
