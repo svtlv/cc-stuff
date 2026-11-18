@@ -24,27 +24,31 @@ Use the PowerShell commands in `../../autopilot/references/windows.md`.
 repo/
 ├── .ralphex/
 │   ├── config                    full commented template, routed keys changed, committed
+│   ├── .gitignore                written by ralphex (progress/, worktrees/)
 │   └── scripts/codex-agrouter.sh Codex through the router, committed, executable
 ├── .autopilot/
-│   └── config                    [review] plan = auto|off (optional, committed)
+│   └── config                    full commented template: [review] plan, [publish], [timeouts], committed
 ├── .agrouter/
-│   ├── config                    only for large doc sets: long-context limits, no key, committed
+│   ├── config                    full commented template: provider, quota prefix, CLIs, limits; no key, committed
 │   └── .gitignore                written by agrouter (logs/)
-└── .gitignore                    .ralphex/progress/
 ```
-**Note:** everything in the repository is shareable. The classifier key lives
-only in the user's global router config or the environment.
+**Note:** everything in the repository is shareable and complete. A user
+with no global config gets the same runs after a clone. The classifier key
+lives only in the user's global router config or the environment.
 
 | File | Scope | Holds |
 |---|---|---|
-| `~/.config/agrouter/config` (`AGROUTER_CONFIG_DIR`) | user | classifier provider and **API key**, default timeout |
-| `.agrouter/config` | repository | routing limits for this project's docs. **Never a key.** |
+| `~/.config/agrouter/config` (`AGROUTER_CONFIG_DIR`) | user | **API key** (and the provider, for repositories without their own config) |
+| `.agrouter/config` | repository | classifier provider, Codex quota prefix, disabled CLIs, limits for this project's docs. **Never a key.** |
+| `~/.config/autopilot/config` (`AUTOPILOT_CONFIG`) | user | personal response times |
+| `.autopilot/config` | repository | recommended plan review, publish mode (pull request by default), response times for this project |
 | `~/.config/ralphex/config` (`RALPHEX_CONFIG_DIR`) | user | personal defaults (often `plan_model`), notifications |
 | `.ralphex/config` | repository | command, executor, models, review tool, limit waiting |
 | `.ralphex/scripts/codex-agrouter.sh` (`.cmd` + `.py` on Windows) | repository | Codex wrapper |
 
 Layering: router = embedded < global < local < environment; runner =
-embedded < global < local < flags. A key missing from the local file keeps
+embedded < global < local < flags; autopilot = built in < global < local <
+`AUTOPILOT_TIMEOUTS`. A key missing from the local file keeps
 its global value: `doctor` shows the effective values. When the global
 config pins a key the recipe routes (for example `plan_model = opus:high`),
 show it and ask whether this repository inherits it or overrides it.
@@ -52,17 +56,23 @@ show it and ask whether this repository inherits it or overrides it.
 ## Driver Commands for Config
 
 ```
-AP config-init                                   # .ralphex/config from the runner's template
+AP config-init --tool ralphex                    # .ralphex/config from the runner's template
+AP config-init --tool agrouter                   # .agrouter/config from the router's template
+AP config-init --tool autopilot                  # .autopilot/config with every key and default
+AP config-init --tool agrouter --merge           # upgrade a hand-written file, keep its values
 AP config-set .ralphex/config <key> --value <v> --comment "<why>"
 AP config-set .agrouter/config <key> --section <name> --value <v> --comment "<why>"
 AP install-wrapper --docs AGENTS.md README.md --doc-dirs docs/architecture
 AP config-show <file>                            # check, secrets redacted
 ```
 
-`config-init` copies only the runner's `config` template (its `--init`
-would also copy the whole `agents/` and `prompts/` trees) with every value
-commented out, so the repository overrides only the keys setup sets and the
-user's global settings (colors, notifications, patterns) keep working.
+`config-init` writes each tool's full template with every value commented
+out, so the file documents every key and overrides only the keys setup
+sets. For the runner it copies only `config` (its `--init` would also copy
+the whole `agents/` and `prompts/` trees). For the router it runs
+`agrouter` once in an empty temporary config directory with no key: the
+router writes its commented embedded defaults there and sends no classifier
+request. The user's global router config is not read or changed.
 
 `doctor` reports `cli_config.doc_drift` when `claude_args` lists a doc that
 no longer exists, or misses one the wrapper globs from its folders. Fix it by
@@ -90,6 +100,7 @@ external Codex review go through the router.
 | `external_review_tool` | `codex` | |
 | `codex_limit_patterns` | default list with `You've hit your usage limit` replaced by `hit your usage limit` | |
 | `wait_on_limit` | `15m` | |
+| `use_worktree` | leave unset (`false`) | autopilot picks a new worktree or the current checkout for each run (`AP place`); `true` breaks runs started inside a worktree |
 
 `claude_args` keeps everything after `--` exactly as shown: those are the
 native Claude flags the runner needs. `claude_args` cannot glob, so list
@@ -186,6 +197,22 @@ never sees them. Offer what exists:
 | Overview | `README.md` |
 | Architecture or design folder | `docs/architecture/`, `docs/design/` (pass as `--doc-dirs` to the wrapper, and list its files in `claude_args`) |
 
+## Recipe: Repository Router Config
+
+Both setups write these keys into `.agrouter/config`, on top of the
+template:
+
+| Section | Key | Value | Why |
+|---|---|---|---|
+| `[agrouter]` | `classifier_provider` | `typesafe` or `openai` (Stage 3) | every user of the repository routes with the same classifier; each keeps the key for it in the global config or `AGROUTER_CLASSIFIER_API_KEY` |
+| `[cli.codex.availability.limits]` | `error_prefix` | `"ERROR: agrouter: "` | when Codex is routed: the runner then reads a Codex quota block as a limit and waits; an old global config may hold `"agrouter: "` |
+| `[cli.<name>]` | `enabled` | `false` | only for a CLI that is missing or unwanted for this repository |
+| `[agrouter]`, `[classifier.typesafe]` | "Large Doc Sets" keys | see below | only for large doc sets |
+
+When the user's global router config has other active non-secret values
+(for example a longer `timeout` or a changed `routing_policy`), show them
+and ask whether the repository takes them too. Never copy `api_key`.
+
 ## Large Doc Sets: Local Router Limits
 
 Sum the chosen docs' sizes. One TypeSafe request holds about
@@ -200,8 +227,8 @@ for this repository in `.agrouter/config` (TypeSafe only):
 | `[classifier.typesafe]` | `request_tokens` | `128000` | allowance per routing request |
 | `[classifier.typesafe]` | `bytes_per_token` | `2.5` | code and docs pack more tokens per byte |
 
-Write only these keys; everything else layers from the global and embedded
-config. Never add `api_key` here.
+Write only these keys in addition to the recipe above; everything else
+comes from the embedded defaults. Never add `api_key` here.
 
 ## Classifier and Key (global router config)
 
@@ -231,8 +258,9 @@ skill's `references/limits.md`.
 The router's installed defaults print Codex quota blocks with
 `error_prefix = "ERROR: agrouter: "`, which the Codex executor needs to
 wait instead of stop. A global router config created before that default
-may still hold `"agrouter: "` under `[cli.codex.availability.limits]`:
-`AP config-show` it and fix the prefix.
+may still hold `"agrouter: "` under `[cli.codex.availability.limits]`.
+The repository router config sets the prefix ("Recipe: Repository Router
+Config"), so such a global value does not change runs in this repository.
 
 The router prints nothing while routing (up to its `timeout`). A runner
 `idle_timeout` must exceed that plus the model's time to first output;
@@ -241,13 +269,14 @@ leave it unset or at several minutes, especially with a 120 s timeout.
 ## Committing
 
 On the default branch the runner refuses to start when files other than
-the plan are uncommitted, and new config files count. Recommend committing:
+the plan are uncommitted, and new config files count. Teammates and CI
+also need the files. Recommend committing:
 
 ```
-git add .ralphex/config .ralphex/scripts .agrouter/config .autopilot/config .gitignore
-git commit -m "Route ralphex runs through agrouter"
+git add .ralphex/config .ralphex/.gitignore .ralphex/scripts .agrouter/config .agrouter/.gitignore .autopilot/config
+git commit -m "Add ralphex, agrouter and autopilot configs"
 ```
 
-Add `.ralphex/progress/` to `.gitignore` when it is not there. The
-alternative is keeping the files local by listing them in
+The `.gitignore` files inside `.ralphex/` and `.agrouter/` come from the
+tools. The alternative is keeping the files local by listing them in
 `.git/info/exclude`.

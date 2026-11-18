@@ -175,6 +175,8 @@ FAKE = textwrap.dedent('''\
         # the real runner prints the selection header and its JSON on separate lines
         out('[26-01-01 10:00:00] agrouter: selection:')
         out('[26-01-01 10:00:00] {"cli":"claude","model":"claude-opus-5-5","effort":"xhigh"}')
+        Path('src').mkdir(exist_ok=True)
+        Path('src/cache.py').write_text('x = 1\\ny = 2\\n')
         time.sleep(1.2); done('a', 'b'); commit('Task 1: one'); time.sleep(1.5)
         out('--- task iteration 2 ---')
         # routing fails: agrouter warns, then its selection says what fell back, wrapped at spaces
@@ -282,6 +284,12 @@ class AutopilotDriver(unittest.TestCase):
         for var in ('ORCA_TERMINAL_HANDLE', 'TMUX', 'TMUX_PANE', 'WEZTERM_PANE', 'KITTY_WINDOW_ID',
                     'KITTY_LISTEN_ON', 'ITERM_SESSION_ID', 'CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID'):
             self.env.pop(var, None)
+
+    def commit_configs(self):
+        """The runner refuses to branch from a dirty default branch; commit what a test wrote."""
+        subprocess.run(['git', 'add', '-A', '.'], cwd=self.repo, check=True)
+        subprocess.run(['git', '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm',
+                        'configs'], cwd=self.repo, check=True, capture_output=True)
 
     def drive(self, *args, env=None):
         res = subprocess.run([sys.executable, str(DRIVER), *args], cwd=self.repo,
@@ -475,23 +483,27 @@ class AutopilotDriver(unittest.TestCase):
             if rep['status'] == 'done':
                 break
         self.assertEqual([u for u in updates if not u.startswith('✓ Run')], [
-            '▶ Task 1/2 started: one · claude-opus-5-5 (xhigh) · steps 0/3',
+            '▶ Task 1/2 started: one · claude-opus-5-5 (xhigh) · steps 0/3\n   Plan: a; b',
             '✓ Task 1/2 done in 0 min: one · claude-opus-5-5 (xhigh) · steps 2/3 · '
-            + updates[1].rsplit(' · ', 1)[1],
+            + updates[1].split('\n')[0].rsplit(' · ', 1)[1]
+            + '\n   Done: a; b · 1 file (+2 -0): cache.py',
             '⚠ Router fallback on Task 2/2: two: Model routing timed out (classifier_timeout, '
             'classify stage). Not chosen by agrouter; runs on claude defaults: model '
             'claude-opus-5-5 (verified default), effort unknown (claude did not report it).',
-            '▶ Task 2/2 started: two · claude-opus-5-5 (default effort) [router fallback] · steps 2/3',
+            '▶ Task 2/2 started: two · claude-opus-5-5 (default effort) [router fallback] · '
+            'steps 2/3\n   Plan: c',
             '✓ Task 2/2 done in 0 min: two · claude-opus-5-5 (default effort) [router fallback] · '
-            'steps 3/3 · ' + updates[4].rsplit(' · ', 1)[1],
+            'steps 3/3 · ' + updates[4].split('\n')[0].rsplit(' · ', 1)[1] + '\n   Done: c',
             '▶ Code review: claude review 1 · claude-opus-5-5 (high)',
             updates[6]])
-        self.assertTrue(updates[1].endswith(' Task 1: one'))
-        self.assertTrue(updates[4].endswith(' Task 2: two'))
+        self.assertTrue(updates[1].split('\n')[0].endswith(' Task 1: one'))
+        self.assertTrue(updates[4].split('\n')[0].endswith(' Task 2: two'))
         self.assertRegex(updates[6], r'^• Commit [0-9a-f]+: fix: review finding$')
         session = self.drive('report', sid)['sessions'][0]
         log = session['task_log']
         self.assertEqual(log['Task 1: one']['models'], ['claude-opus-5-5 (xhigh)'])
+        self.assertEqual((log['Task 1: one']['about'], log['Task 1: one']['did'],
+                          log['Task 1: one']['changes']), ('a; b', 'a; b', '1 file (+2 -0): cache.py'))
         self.assertTrue(log['Task 2: two']['commit'].endswith('Task 2: two'))
         self.assertEqual(session['models_used'], {'claude/claude-opus-5-5/xhigh': 1,
                                                   'claude/claude-opus-5-5/? (router fallback)': 1,
@@ -794,11 +806,18 @@ class AutopilotDriver(unittest.TestCase):
         self.assertFalse(cap['claude']['usable'])
         self.assertIn('claude auth login', cap['claude']['reason'])
         self.assertFalse(cap['plan_review']['usable'])
+        # the question still offers a review: the executor reviews when the other model cannot
+        self.assertEqual(cap['plan_review']['recommended'], 'same')
         plan = self.repo / 'p.md'
         plan.write_text('### Task 1: a\n- [ ] a\n')
-        review = self.drive('review-plan', 'p.md', env=env)
+        pick = self.drive('review-plan', 'p.md', '--options', env=env)
+        self.assertEqual((pick['recommended'], pick['review_pick']['timeout_s']), ('same', 600))
+        self.assertEqual({o['option']: o['usable'] for o in pick['options']},
+                         {'external': False, 'same': True, 'edit': True, 'none': True})
+        review = self.drive('review-plan', 'p.md', '--reviewer', 'claude', env=env)
         self.assertTrue(review['skipped'])
         self.assertEqual(review['reviewer'], 'claude')
+        self.commit_configs()
         start = self.drive('run', '--plan', 'p.md', env=env)
         self.assertEqual(start['executor'], 'codex')
         self.until(start['session'], 'done')
@@ -809,6 +828,7 @@ class AutopilotDriver(unittest.TestCase):
         config.write_text('plan_model = opus:high\nreview_model = sonnet:medium\n')
         before = config.read_bytes()
         env = dict(self.env, FAKE_CLAUDE_LOGIN='0', FAKE_MODE='env')
+        self.commit_configs()
         (self.repo / 'p.md').write_text('### Task 1: a\n- [ ] a\n')
         start = self.drive('run', '--plan', 'p.md', '--', '--task-model', 'opus:high', env=env)
         self.assertEqual(start['executor'], 'codex')
@@ -1133,8 +1153,112 @@ class Reconfigure(unittest.TestCase):
         w = self.ap('config-summary')['docs']['wrapper']
         self.assertEqual((w['style'], w['docs'], w['doc_dirs']),
                          ('autopilot', ['AGENTS.md', 'README.md'], ['docs/arch']))
+        self.assertEqual(self.ap('config-summary')['issues'], [
+            'the runner config (.ralphex/config) is partial (not from the template): '
+            'run autopilot-setup to upgrade it with config-init --merge',
+            'this repository has no router config (.agrouter/config): run autopilot-setup repo',
+            'this repository has no autopilot config (.autopilot/config): run autopilot-setup repo'])
+        (self.repo / '.agrouter').mkdir()
+        (self.repo / '.agrouter/config').write_text(
+            '# agrouter embedded defaults\n[agrouter]\nclassifier_provider = typesafe\n')
+        (self.repo / '.autopilot').mkdir()
+        (self.repo / '.autopilot/config').write_text(autopilot.autopilot_template())
+        self.ap('config-set', '.autopilot/config', 'plan', '--section', 'review', '--value', 'auto')
+        cfg = self.repo / '.ralphex/config'
+        cfg.write_text('# ralphex configuration\n' + cfg.read_text())
         self.assertEqual(self.ap('config-summary')['issues'], [])
         self.assertIn('error', self.ap('set-docs', '--docs', 'nope.md'))
+
+    def test_config_init_writes_full_router_and_autopilot_templates(self):
+        fakebin = Path(self.tmp.name) / 'bin'
+        fakebin.mkdir()
+        python_tool(fakebin / 'agrouter', textwrap.dedent('''\
+            import json, os, sys
+            from pathlib import Path
+            Path(os.environ['AGROUTER_CONFIG_DIR']).mkdir(parents=True, exist_ok=True)
+            Path(os.environ['AGROUTER_CONFIG_DIR'], 'config').write_text(
+                '# defaults\\n# [agrouter]\\n# timeout = 30s\\n# [classifier.typesafe]\\n'
+                '# api_key = leaked\\n')
+            Path(os.environ['PROBE']).write_text(json.dumps({
+                'cwd': os.getcwd(), 'argv': sys.argv[1:],
+                'key_env': 'AGROUTER_CLASSIFIER_API_KEY' in os.environ}))
+            sys.exit(2)
+            '''))
+        probe = Path(self.tmp.name) / 'probe.json'
+        self.env = dict(self.env, PATH=f"{fakebin}{os.pathsep}{self.env['PATH']}",
+                        PROBE=str(probe), AGROUTER_CLASSIFIER_API_KEY='secret')
+        out = self.ap('config-init', '--tool', 'agrouter')
+        self.assertEqual((out['file'], out['created']), ('.agrouter/config', True))
+        text = (self.repo / '.agrouter/config').read_text()
+        self.assertIn('# timeout = 30s', text)
+        self.assertNotIn('leaked', text)
+        self.assertEqual(list(autopilot.ini_active(text)), [])
+        seen = json.loads(probe.read_text())
+        self.assertFalse(seen['key_env'])
+        self.assertIn('--api-key=', seen['argv'])
+        self.assertNotEqual(Path(seen['cwd']).resolve(), self.repo.resolve())
+        self.assertFalse((Path(self.tmp.name) / 'global/r').exists())
+
+        self.ap('config-init', '--tool', 'autopilot')
+        cfg = self.repo / '.autopilot/config'
+        text = cfg.read_text()
+        self.assertEqual([s for s, _, _ in autopilot.ini_active(text)], [])
+        for key in autopilot.POLICY:
+            self.assertIn(f'# {key} = ', text)
+        self.assertIn('# decide.remind = 15m', text)
+        self.ap('config-set', '.autopilot/config', 'plan', '--section', 'review', '--value', 'auto')
+        self.ap('config-set', '.autopilot/config', 'decide', '--section', 'timeouts', '--value', '2h')
+        policy = self.ap('policy')
+        self.assertEqual(policy['policy']['decide']['timeout'], 7200)
+        self.assertEqual([Path(p).resolve() for p in policy['source']], [cfg.resolve()])
+        self.assertIn('[review]\n', cfg.read_text())
+
+    def test_merge_upgrades_a_partial_config_and_keeps_its_values(self):
+        own = self.repo / '.autopilot/config'
+        own.parent.mkdir()
+        own.write_text('[review]\n# the team wants a second model on every plan\nplan = codex\n\n'
+                       '[timeouts]\ndecide = 2h\n')
+        self.assertEqual(autopilot.config_state(own, 'autopilot'), 'partial')
+        issues = self.ap('config-summary')['issues']
+        self.assertTrue(any('(.autopilot/config) is partial' in i for i in issues), issues)
+        kept = self.ap('config-init', '--tool', 'autopilot')
+        self.assertEqual((kept['created'], kept['state']), (False, 'partial'))
+        out = self.ap('config-init', '--tool', 'autopilot', '--merge')
+        self.assertEqual(out['merged'], ['[review] plan', '[timeouts] decide'])
+        text = own.read_text()
+        self.assertEqual(autopilot.config_state(own, 'autopilot'), 'full')
+        self.assertIn('# the team wants a second model on every plan\nplan = codex\n', text)
+        self.assertIn('# decide: ', text)
+        self.assertEqual(list(autopilot.ini_active(text)),
+                         [('review', 'plan', 'codex'), ('timeouts', 'decide', '2h')])
+        backup = Path(out['backup'])
+        self.assertIn('decide = 2h', backup.read_text())
+        self.assertFalse(backup.resolve().is_relative_to(self.repo.resolve()))
+        again = self.ap('config-init', '--tool', 'autopilot', '--merge')
+        self.assertEqual((again['created'], again['state']), (False, 'full'))
+        issues = self.ap('config-summary')['issues']
+        self.assertFalse(any('.autopilot/config' in i for i in issues), issues)
+
+    def test_router_config_without_provider_is_an_issue(self):
+        router = self.repo / '.agrouter/config'
+        router.parent.mkdir()
+        router.write_text('# agrouter embedded defaults\n[agrouter]\ntimeout = 120s\n')
+        issues = self.ap('config-summary')['issues']
+        self.assertTrue(any('classifier_provider' in i for i in issues), issues)
+        self.ap('config-set', '.agrouter/config', 'classifier_provider', '--section', 'agrouter',
+                '--value', 'typesafe')
+        issues = self.ap('config-summary')['issues']
+        self.assertFalse(any('agrouter' in i for i in issues), issues)
+
+    def test_secrets_never_go_into_repository_configs(self):
+        res = subprocess.run([sys.executable, str(DRIVER), 'config-set', '.agrouter/config', 'api_key',
+                              '--section', 'classifier.typesafe', '--value', 'K'],
+                             cwd=self.repo, env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertFalse((self.repo / '.agrouter/config').exists())
+        glob = Path(self.tmp.name) / 'global/r/config'
+        self.ap('config-set', str(glob), 'api_key', '--section', 'classifier.typesafe', '--value', 'K')
+        self.assertIn('api_key = K', glob.read_text())
 
     def test_set_docs_quotes_paths_the_way_the_runner_splits_them(self):
         (self.repo / 'docs/design notes').mkdir()
@@ -1356,6 +1480,306 @@ class ReviewPlan(unittest.TestCase):
             prompt = (fakebin / 'prompt.txt').read_text()
             self.assertIn('Task: add caching', prompt)
             self.assertIn('### Task 1: a', prompt)
+
+
+class StepsSummary(unittest.TestCase):
+    def test_short_line_from_the_plan_steps(self):
+        self.assertIsNone(autopilot.steps_summary([]))
+        self.assertEqual(autopilot.steps_summary(['add `Cache` to `pkg/x.go`.', 'write tests;']),
+                         'add Cache to pkg/x.go; write tests')
+        long = ['step ' + 'x' * 120, 'two', 'three']
+        out = autopilot.steps_summary(long, limit=100)
+        self.assertTrue(out.startswith('step ') and '...; two' in out and out.endswith('(+1 more)'), out)
+
+
+class PlanReviewPick(unittest.TestCase):
+    def pick(self, pref, codex=True, claude=True, executor='claude'):
+        usable = {'codex': (codex, None if codex else 'codex is not installed'),
+                  'claude': (claude, None if claude else 'claude is logged out')}
+        other = 'codex' if executor == 'claude' else 'claude'
+        reviewer = other if pref == 'auto' else (None if pref == 'off' else pref)
+        return autopilot.plan_review_pick(pref, reviewer, executor, other, usable)['recommended']
+
+    def test_recommendation_keeps_the_flow_moving_with_the_best_usable_review(self):
+        self.assertEqual(self.pick('auto'), 'external')
+        self.assertEqual(self.pick('auto', codex=False), 'same')
+        self.assertEqual(self.pick('auto', executor='codex'), 'external')
+        self.assertEqual(self.pick('claude'), 'same')
+        self.assertEqual(self.pick('codex', codex=False), 'same')
+        self.assertEqual(self.pick('auto', codex=False, claude=False), 'none')
+        self.assertEqual(self.pick('off'), 'none')
+
+    def test_no_config_recommends_the_external_review(self):
+        with unittest.mock.patch.object(autopilot, 'autopilot_config', return_value={}), \
+                unittest.mock.patch.object(autopilot, 'codex_status', return_value=(True, None)), \
+                unittest.mock.patch.object(autopilot, 'claude_status', return_value=(True, None)):
+            plan = autopilot.review_capability('/nonexistent', {})['plan_review']
+        self.assertEqual((plan['setting'], plan['recommended']), ('auto', 'external'))
+
+
+class ImplementationPlace(unittest.TestCase):
+    """Where the run works: a new worktree from the default branch, or here."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name) / 'repo'
+        self.repo.mkdir()
+        git(self.repo, 'init', '-q', '-b', 'master')
+        (self.repo / 'README.md').write_text('x')
+        git(self.repo, 'add', '.')
+        git(self.repo, 'commit', '-qm', 'init')
+
+    def place(self, where=None, cfg=None, plan=None):
+        return autopilot.implementation_place(str(where or self.repo), cfg or {}, plan)
+
+    def usable(self, place):
+        return {o['option']: o['usable'] for o in place['options']}
+
+    def test_planned_on_master_runs_in_a_new_worktree(self):
+        p = self.place()
+        self.assertEqual((p['checkout'], p['recommended']), ('main checkout', 'worktree'))
+        self.assertEqual(p['options'][0]['run_args'], ['--new-worktree'])
+        self.assertEqual(Path(p['options'][0]['path']).parent.resolve(), (self.repo.parent / 'workspaces/repo').resolve())
+        self.assertEqual(self.usable(p), {'worktree': True, 'here': True})
+        plan = self.repo / 'docs/plans/x.md'
+        plan.parent.mkdir(parents=True)
+        plan.write_text('### Task 1: a\n- [ ] a\n')
+        self.assertEqual(self.place(plan=plan)['dirty'], [])
+        (self.repo / 'notes.txt').write_text('wip')
+        (self.repo / 'README.md').write_text('changed')
+        git(self.repo, 'mv', 'README.md', 'READ ME.md')
+        self.assertEqual(sorted(self.place(plan=plan)['dirty']), ['READ ME.md', 'notes.txt'])
+        p = self.place(plan=plan)
+        self.assertEqual((p['recommended'], self.usable(p)['here']), ('worktree', False))
+        self.assertIn('notes.txt', p['options'][1]['reason'])
+
+    def test_inside_a_feature_worktree_the_run_stays_there(self):
+        wt = Path(self.tmp.name) / 'wt'
+        git(self.repo, 'worktree', 'add', '-q', '-b', 'feature-x', str(wt))
+        p = self.place(wt)
+        self.assertEqual((p['checkout'], p['branch'], p['recommended']),
+                         ('worktree', 'feature-x', 'here'))
+        self.assertEqual(self.usable(p), {'here': True, 'worktree': False})
+        self.assertIn('only from master', p['options'][1]['reason'])
+        blocked = self.place(wt, {'use_worktree': 'true'})
+        self.assertIsNone(blocked['recommended'])
+        self.assertIn('use_worktree = false', blocked['why'])
+
+    def test_feature_branch_in_the_main_checkout_stays_on_it(self):
+        git(self.repo, 'checkout', '-qb', 'feature-y')
+        p = self.place()
+        self.assertEqual((p['recommended'], self.usable(p)['worktree']), ('here', False))
+
+    def test_new_worktree_is_made_next_to_the_folder_with_plan_and_configs(self):
+        plan = self.repo / 'docs/plans/20261116-add-cache.md'
+        plan.parent.mkdir(parents=True)
+        plan.write_text('### Task 1: a\n- [ ] a\n')
+        (self.repo / '.autopilot').mkdir()
+        (self.repo / '.autopilot/config').write_text('[publish]\nmode = pr\n')
+        (self.repo / 'notes.txt').write_text('wip')
+        env = {'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@t',
+               'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@t'}
+        with unittest.mock.patch.dict(os.environ, env):
+            wt = autopilot.prepare_worktree(str(self.repo), plan, [])
+        path = Path(wt['path'])
+        self.assertEqual(path.resolve(), (self.repo.parent / 'workspaces/repo/Add-cache').resolve())
+        self.assertEqual((wt['branch'], wt['base'], wt['reused']), ('add-cache', 'master', False))
+        self.assertEqual(sorted(wt['copied']), ['.autopilot/config', 'docs/plans/20261116-add-cache.md'])
+        self.assertTrue((path / 'docs/plans/20261116-add-cache.md').exists())
+        self.assertFalse((path / 'notes.txt').exists())
+        log = subprocess.check_output(['git', 'log', '--oneline', '-1'], cwd=path, text=True)
+        self.assertIn('add plan: add-cache', log)
+        # the source checkout stays on master, with its own files
+        self.assertEqual(subprocess.check_output(['git', 'branch', '--show-current'],
+                                                 cwd=self.repo, text=True).strip(), 'master')
+        self.assertTrue((self.repo / 'notes.txt').exists())
+        again = autopilot.prepare_worktree(str(self.repo), plan, [])
+        self.assertEqual((again['reused'], Path(again['path']).resolve()), (True, path.resolve()))
+        place = self.place(path)
+        self.assertEqual((place['checkout'], place['recommended']), ('worktree', 'here'))
+
+    def test_worktree_path_follows_the_workspaces_layout_or_the_config(self):
+        wt = Path(self.tmp.name) / 'wt'
+        git(self.repo, 'worktree', 'add', '-q', '-b', 'side', str(wt))
+        # from a linked worktree the layout still hangs off the main checkout's folder
+        self.assertEqual(autopilot.sibling_path(str(wt), 'feature/x').resolve(),
+                         (self.repo.parent / 'workspaces/repo/Feature-x').resolve())
+        with unittest.mock.patch.object(autopilot, 'autopilot_config',
+                                        return_value={'path': '{parent}/wt/{repo}-{branch}'}):
+            self.assertEqual(autopilot.sibling_path(str(self.repo), 'add-cache').resolve(),
+                             (self.repo.parent / 'wt/repo-add-cache').resolve())
+
+    def test_run_with_a_new_worktree_starts_inside_it(self):
+        plan = self.repo / 'docs/plans/20261116-add-cache.md'
+        plan.parent.mkdir(parents=True)
+        plan.write_text('### Task 1: a\n- [ ] a\n')
+        cwd = os.getcwd()
+        self.addCleanup(os.chdir, cwd)
+        os.chdir(self.repo)
+        env = {'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@t', 'GIT_COMMITTER_NAME': 't',
+               'GIT_COMMITTER_EMAIL': 't@t', 'RALPHEX_CONFIG_DIR': str(Path(self.tmp.name) / 'none')}
+        with unittest.mock.patch.dict(os.environ, env), \
+                unittest.mock.patch.object(autopilot, 'require_tools'), \
+                unittest.mock.patch.object(autopilot, 'start_session') as start:
+            args = autopilot.argparse.Namespace(plan='docs/plans/20261116-add-cache.md',
+                                                cli_args=['--worktree', '--wait=900s'], force=False,
+                                                max_restarts=1, flow='f', new_worktree=False,
+                                                worktree_path=None)
+            autopilot.cmd_run(args)
+            started_in = Path(os.getcwd()).resolve()
+        kind, target, cli_args, _, flow, extra = start.call_args.args
+        self.assertEqual(started_in, (self.repo.parent / 'workspaces/repo/Add-cache').resolve())
+        self.assertEqual((kind, target, cli_args), ('run', 'docs/plans/20261116-add-cache.md',
+                                                    ['--wait=900s']))
+        self.assertEqual(extra['source_repo'], str(self.repo.resolve()))
+        self.assertEqual(autopilot.in_repo({'repo': 'x', 'source_repo': str(self.repo.resolve())},
+                                           str(self.repo.resolve())), True)
+
+    def test_run_refuses_a_worktree_the_runner_cannot_make(self):
+        wt = Path(self.tmp.name) / 'wt'
+        git(self.repo, 'worktree', 'add', '-q', '-b', 'feature-z', str(wt))
+        (wt / 'p.md').write_text('### Task 1: a\n- [ ] a\n')
+        env = dict(os.environ, AUTOPILOT_STATE_DIR=str(Path(self.tmp.name) / 'state'),
+                   RALPHEX_CONFIG_DIR=str(Path(self.tmp.name) / 'none'),
+                   AUTOPILOT_CONFIG='/none')
+        with unittest.mock.patch.dict(os.environ, env):
+            res = subprocess.run([sys.executable, str(DRIVER), 'place', '--plan', 'p.md'],
+                                 cwd=wt, capture_output=True, text=True)
+        self.assertEqual(json.loads(res.stdout)['recommended'], 'here')
+        with unittest.mock.patch.object(autopilot, 'require_tools'), \
+                unittest.mock.patch.object(autopilot, 'start_session') as start, \
+                unittest.mock.patch.object(autopilot, 'git_root', return_value=str(wt)), \
+                unittest.mock.patch.object(autopilot, 'cli_config_paths', return_value=[]), \
+                unittest.mock.patch('os.getcwd', return_value=str(wt)):
+            args = autopilot.argparse.Namespace(plan=str(wt / 'p.md'), cli_args=['--worktree'],
+                                                force=False, max_restarts=1, flow=None,
+                                                new_worktree=False, worktree_path=None)
+            with self.assertRaises(SystemExit), \
+                    unittest.mock.patch('sys.stdout', new_callable=__import__('io').StringIO) as out:
+                autopilot.cmd_run(args)
+            self.assertIn('Recommended: here', out.getvalue())
+            start.assert_not_called()
+            args.cli_args = []
+            autopilot.cmd_run(args)
+            start.assert_called_once()
+
+
+class Publish(unittest.TestCase):
+    """Push the run's branch and open a pull request against the branch it started from."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name)
+        self.repo, self.remote, fakebin = base / 'repo', base / 'remote.git', base / 'bin'
+        fakebin.mkdir()
+        git(base, 'init', '-q', '--bare', str(self.remote))
+        self.repo.mkdir()
+        git(self.repo, 'init', '-q', '-b', 'master')
+        (self.repo / 'README.md').write_text('x')
+        git(self.repo, 'add', '.')
+        git(self.repo, 'commit', '-qm', 'init')
+        git(self.repo, 'remote', 'add', 'origin', 'https://github.com/o/r.git')
+        git(self.repo, 'config', 'remote.origin.pushurl', str(self.remote))
+        git(self.repo, 'config', 'url.' + str(self.remote) + '.insteadOf', 'https://github.com/o/r.git')
+        git(self.repo, 'push', '-q', 'origin', 'master')
+        self.calls = base / 'gh.jsonl'
+        python_tool(fakebin / 'gh', textwrap.dedent(f'''\
+            import json, os, sys
+            with open({str(self.calls)!r}, 'a') as f:
+                f.write(json.dumps(sys.argv[1:]) + '\\n')
+            if sys.argv[1:3] == ['pr', 'view']:
+                if os.environ.get('FAKE_PR_OPEN'):
+                    print(json.dumps({{'url': 'https://github.com/o/r/pull/7', 'state': 'OPEN',
+                                      'baseRefName': 'master'}}))
+                    sys.exit(0)
+                sys.exit(1)
+            print('https://github.com/o/r/pull/8')
+            '''))
+        self.env = dict(os.environ, PATH=f"{fakebin}{os.pathsep}{os.environ['PATH']}",
+                        AUTOPILOT_STATE_DIR=str(base / 'state'), AUTOPILOT_CONFIG='/none',
+                        RALPHEX_CONFIG_DIR=str(base / 'none'))
+        self.n = 0
+
+    def session(self, start_branch, status='done', plan='docs/plans/20261116-add-cache.md'):
+        self.n += 1
+        sid = f'20261116-000000-run-{self.n:04d}'
+        sdir = Path(self.env['AUTOPILOT_STATE_DIR']) / 'sessions' / sid
+        sdir.mkdir(parents=True)
+        (sdir / 'session.json').write_text(json.dumps({
+            'kind': 'run', 'target': plan, 'repo': str(self.repo), 'argv': ['ralphex', plan],
+            'start_branch': start_branch, 'flow': f'f{self.n}'}))
+        (sdir / 'state.json').write_text(json.dumps({'status': status, 'events': []}))
+        return sid
+
+    def work(self, branch, start='master', worktree=True):
+        where = self.repo
+        if worktree:
+            where = self.repo / '.ralphex/worktrees' / branch
+            git(self.repo, 'worktree', 'add', '-q', '-b', branch, str(where), start)
+        else:
+            git(self.repo, 'checkout', '-qb', branch, start)
+        (where / f'{branch}.txt').write_text('done')
+        git(where, 'add', '.')
+        git(where, 'commit', '-qm', f'work on {branch}')
+        return where
+
+    def publish(self, *args, env=None):
+        res = subprocess.run([sys.executable, str(DRIVER), 'publish', *args], cwd=self.repo,
+                             env=env or self.env, capture_output=True, text=True)
+        return json.loads(res.stdout.strip().splitlines()[-1])
+
+    def gh(self):
+        return [json.loads(l) for l in self.calls.read_text().splitlines()] if self.calls.exists() else []
+
+    def test_worktree_run_from_master_opens_a_pr_into_master(self):
+        folder = self.work('add-cache')
+        out = self.publish(self.session('master'))
+        self.assertIsNone(out['skipped'], out)
+        self.assertEqual((out['branch'], out['base'], out['pushed'], out['commits']),
+                         ('add-cache', 'master', True, 1))
+        self.assertEqual(Path(out['folder']).resolve(), folder.resolve())
+        self.assertEqual(out['pr'], {'url': 'https://github.com/o/r/pull/8', 'created': True,
+                                     'draft': False, 'base': 'master'})
+        create = self.gh()[-1]
+        self.assertEqual(create[:2], ['pr', 'create'])
+        self.assertEqual(create[create.index('--base') + 1], 'master')
+        self.assertEqual(create[create.index('--head') + 1], 'add-cache')
+        self.assertNotIn('--draft', create)
+        self.assertIn('add-cache', subprocess.check_output(['git', 'ls-remote', '--heads', str(self.remote)], text=True))
+        report = subprocess.run([sys.executable, str(DRIVER), 'report', '--flow', 'f1'],
+                                cwd=self.repo, env=self.env, capture_output=True, text=True)
+        rgit = json.loads(report.stdout)['git']
+        self.assertEqual((rgit['branch'], len(rgit['commits'])), ('add-cache', 1))
+        self.assertIn('Opened pull request', rgit['published'])
+
+    def test_feature_worktree_targets_the_branch_it_was_created_from(self):
+        git(self.repo, 'branch', 'develop')
+        git(self.repo, 'push', '-q', 'origin', 'develop')
+        self.work('feature-x', start='develop')
+        out = self.publish(self.session('feature-x', status='failed'))
+        self.assertEqual((out['branch'], out['base']), ('feature-x', 'develop'))
+        self.assertIn('created from develop', out['base_why'])
+        self.assertTrue(out['pr']['draft'])
+
+    def test_base_missing_on_the_remote_falls_back_to_the_default_branch(self):
+        git(self.repo, 'branch', 'local-only')
+        self.work('feature-y', start='local-only')
+        out = self.publish(self.session('feature-y'))
+        self.assertEqual(out['base'], 'master')
+        self.assertIn('not on origin', out['base_why'])
+
+    def test_open_pr_is_reused_and_nothing_to_publish_is_skipped(self):
+        self.work('add-cache')
+        out = self.publish(self.session('master'), env=dict(self.env, FAKE_PR_OPEN='1'))
+        self.assertEqual(out['pr'], {'url': 'https://github.com/o/r/pull/7', 'created': False,
+                                     'base': 'master'})
+        self.assertFalse(any(c[:2] == ['pr', 'create'] for c in self.gh()))
+        empty = self.publish(self.session('master', plan='docs/plans/x-none.md'))
+        self.assertIn('no branch', empty['skipped'])
+        off = self.publish(self.session('master'), '--mode', 'off')
+        self.assertEqual((off['pushed'], off['skipped']), (False, '[publish] mode = off'))
 
 
 class ClaudeAvailability(unittest.TestCase):

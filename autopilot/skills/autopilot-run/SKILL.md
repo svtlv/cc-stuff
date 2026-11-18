@@ -1,10 +1,10 @@
 ---
 name: autopilot-run
 description: This skill should be used when the user runs "/autopilot-run" or "$autopilot-run", or asks to "run this plan with autopilot", "execute the plan", "implement docs/plans/x.md autonomously", "start the autopilot run", "resume the autopilot run", "watch the run", "pause after this task", or sends an "autopilot: reattach to run" wake line. It first checks that the plan file suits the runner (task sections, checkboxes, tests) and offers to redesign an unsuitable one with autopilot-plan, then executes it with the autonomous plan runner, monitors every phase, restarts failed attempts automatically, diagnoses and fixes blocking problems itself, shows errors as they happen, keeps the user posted on what the run is doing right now and ends with a short report: decisions made without the user, then the goal and what was done.
-argument-hint: "<plan file> [-- extra runner flags such as --worktree or --tasks-only]"
+argument-hint: "<plan file> [-- extra runner flags such as --tasks-only]"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, Agent, CronCreate, CronDelete
 metadata:
-  version: "0.4.0"
+  version: "0.5.0"
 ---
 
 # Autopilot Run
@@ -83,12 +83,14 @@ repository root when setup ran in between).
 | `cli_config.spec_problems` not empty | The phase specs would send the wrong executor's models. Recommend starting with `-- --plan-model=: --task-model=: --review-model=:` (this run only) and fixing `.ralphex/config` later; `preflight` response time. |
 | `active_sessions` has a live `run` for this plan | Attach to it: skip Step 3 and go to Step 4 with that session. |
 | `reviews.code_review`: tool `codex`, not usable | The driver skips the external review for this run on its own; say why in one line (from `reason`) and how to fix it. |
-| `repo_clean` false on the default branch | The runner creates a feature branch and refuses when files other than the plan are uncommitted. Show `git status --short` and recommend a worktree (`-- --worktree`), which leaves the user's changes untouched; committing them is the alternative. Never stash or discard them. |
+| Where the run works | Run `AP place --plan <path>` and use the recommended option's `run_args` ("Where the Run Works" in `../autopilot/SKILL.md`): a new worktree in `<parent>/workspaces/<repo>/<Name>` when the plan is on the default branch in the main checkout, here when this is already a worktree or a feature branch. Uncommitted files other than the plan block "here" on the default branch; the worktree leaves them untouched. Never stash or discard them. When the user passed `--worktree` and `place` shows it is not usable, say why and offer the recommended place. `recommended: null`: show `why` and stop until the user fixes it. |
 
-State what will run in one short table: plan, branch (current or the one the
+State what will run in one short table: plan, where (`place`: new
+worktree, this worktree or this checkout), branch (current or the one the
 runner will create), setup (Claude or Codex, from `cli_config.executor`; a
 `--codex` flag switches to Codex), models from `cli_config.effective`,
-phases (Codex: no external review), extra flags. Starting is an outward action (it commits on a branch, may run for
+phases (Codex: no external review), extra flags, and publish (`[publish]
+mode`: push and pull request into the start branch by default). Starting is an outward action (it commits on a branch, may run for
 hours and spends model usage), so ask unless the user already asked to
 start right away or the `autopilot` skill obtained consent. Offer three
 answers: start, **change the plan first** (revision rounds per
@@ -104,7 +106,7 @@ Decisions" in `monitoring.md`).
 ## Step 3 — Start
 
 ```
-AP run --plan <plan path> [--flow <id>] [--max-restarts N] [-- <extra flags>]
+AP run --plan <plan path> [--new-worktree] [--flow <id>] [--max-restarts N] [-- <extra flags>]
 ```
 
 Pass `--flow` when the `autopilot` skill provides one; otherwise keep the
@@ -151,7 +153,10 @@ a new chat, or after any interruption, reattach with `AP next <session>
 ## Step 5 — Final Report
 
 Always, whatever the outcome. When invoked by the `autopilot` skill,
-return control to it (it writes the report for the whole flow). Otherwise
+return control to it (it publishes and writes the report for the whole
+flow). Otherwise publish first, as Step 6 of `../autopilot/SKILL.md`
+describes (`AP publish <session> --body-file <file>`: push the branch,
+open a pull request against the branch the run started from), then
 follow `report.md` with `AP report --flow <id>`: first every decision
 made without the user (`without_user`), then the goal and what was done
 (summarize on the branch changes when available, plan tasks and their

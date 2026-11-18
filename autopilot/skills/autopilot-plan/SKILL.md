@@ -4,7 +4,7 @@ description: This skill should be used when the user runs "/autopilot-plan" or "
 argument-hint: "[task description | --redesign <file>] [-- extra runner flags]"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, Agent
 metadata:
-  version: "0.4.0"
+  version: "0.5.0"
 ---
 
 # Autopilot Plan
@@ -166,12 +166,31 @@ the chat already knows. Do not start a second `AP next`.
 ## Step 5 — Review the Finished Plan
 
 Review the plan file once, after ralphex wrote it, as `/planning:make` does
-with "Auto review". Follow "Plan Review" in `reviews.md`:
+with "Auto review". Follow "Plan Review" in `reviews.md`. Always ask the
+user which review to run, and always give a recommended option, so the
+flow continues when nobody answers:
 
-1. Ask in plain text which review to run. Use `ask-timer` with
-   `--decision review_pick` (10 min). Recommend the option from
-   `[review] plan` in the config (`auto` → external), or "No review" when
-   it is `off`.
+1. Run `AP review-plan <plan> --session <session> --options`. It returns
+   the `options` (with `usable` and `reason` for each reviewer for the
+   session's actual executor), the `recommended` option and
+   `recommended_why`. The recommendation comes from `[review] plan`
+   (default `auto`: the other model, else the same agent when the other
+   model is not usable; `off`: no review).
+2. Ask in plain text, with the recommended option first and marked
+   "(recommended: <recommended_why>)", and the clock time at which it is
+   taken. Show an unusable reviewer with its reason, not as a choice. Start
+   `AP ask-timer start --id <flow>-review --decision review_pick` (10 min)
+   and wait with `ask-timer wait`. Do not use a blocking question tool:
+   its dialog stops the timer, and the flow then waits for the user.
+
+   ```
+   Plan written: docs/plans/<name>.md (5 tasks). Review it before we go on?
+     1. External review by Codex (recommended: codex reviews plans here)
+     2. Same-agent review by Claude, read-only
+     3. Edit the plan yourself
+     4. No review
+   I'll start option 1 at 16:40 (in 10 min) if you don't answer.
+   ```
 
    | Option | Command |
    |---|---|
@@ -180,18 +199,22 @@ with "Auto review". Follow "Plan Review" in `reviews.md`:
    | Edit the plan yourself | the user edits the file; then `AP check-plan <plan>` |
    | No review | go on |
 
-2. Say "Codex reviews the plan (about 3 min)" and run the review (Claude
+   On a reply, `ask-timer cancel` and act on it. When the timer expires,
+   take the recommended option and log it:
+   `AP log <session> --kind decision --by auto --question "Review the plan?" --waited 10 --text "External review (codex)" --reason "<recommended_why>"`.
+   The final report lists it under "Decided without you".
+3. Say "Codex reviews the plan (about 3 min)" and run the review (Claude
    Code: in the background). Start nothing else until it returns.
-3. Show the result: the status line, then each finding as a table row
+4. Show the result: the status line, then each finding as a table row
    (number, severity, text, your assessment). The reviewer did not see this
    chat, so a finding can be settled already, or be noise: say so.
-4. Ask which findings to apply ("1,3", "all", "none"). Recommend the ones
+5. Ask which findings to apply ("1,3", "all", "none"). Recommend the ones
    your assessment accepts. Use `ask-timer --decision review_apply`
    (15 min).
-5. Apply the chosen findings: `AP plan-rev snapshot <plan>`, edit the plan,
+6. Apply the chosen findings: `AP plan-rev snapshot <plan>`, edit the plan,
    `AP plan-rev diff <plan>`, `AP check-plan <plan>`. Log the outcome with
    `AP log <session> --kind decision --text "Applied findings 1,3"`.
-6. Offer the remaining options again without the review just done, as
+7. Offer the remaining options again without the review just done, as
    `/planning:make` does. When a review was skipped or failed, keep it in
    the list.
 

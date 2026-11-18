@@ -6,7 +6,7 @@ the main one produced, so it catches what that model missed.
 | Review | Owner | Reviews | Default |
 |---|---|---|---|
 | **External code review** | The runner (ralphex), after the tasks | The branch's code changes | `external_review_tool = codex` in the Claude setup; skipped in the Codex setup |
-| **Plan review** | autopilot (`AP review-plan`), once, on the finished plan file | The plan, read-only | Offered after planning; `[review] plan` sets the recommended reviewer (`off` recommends no review) |
+| **Plan review** | autopilot (`AP review-plan`), once, on the finished plan file | The plan, read-only | Always asked after planning; `[review] plan` (default `auto`) sets the recommended option, taken after `review_pick` |
 
 ## Can Either CLI Review Here?
 
@@ -18,7 +18,7 @@ the main one produced, so it catches what that model missed.
 | `claude.usable`, `claude.reason` | Installed, logged in (`claude auth status --json`), not disabled in the agrouter config |
 | `execution` | Configured executor, whether it is usable, its reason, possible Codex fallback and any configuration blocker |
 | `code_review` | `tool` (`codex`, `custom`, `none`), `usable`, `reason` |
-| `plan_review` | `setting` (`off`, `auto`, `codex`, `claude`), `reviewer`, `usable`, `cross_model` (the other model for this setup) and whether it is usable |
+| `plan_review` | `setting` (`off`, `auto` (default), `codex`, `claude`), `reviewer`, `usable`, `cross_model` (the other model for this setup) and whether it is usable, `options` and the `recommended` option with `recommended_why` |
 
 `auto` picks the other model: Codex reviews plans in the Claude setup,
 Claude in the Codex setup.
@@ -82,9 +82,22 @@ ralphex: questions ─► drafts ─► accept ─► plan file
                                               │
 autopilot: which review? ─► review-plan ─► findings + assessment ─► which to apply? ─► edit, check
               (review_pick)                                          (review_apply)
+              no reply: take the recommended option                   no reply: apply the accepted findings
 ```
 **Note:** every step waits for the one before it. The chat runs no review
-beside a ralphex prompt, so the user always sees one open question.
+beside a ralphex prompt, so the user always sees one open question. Each
+question has a recommended answer, so the flow never blocks on it.
+
+The recommended option (`review-plan <plan> --session <s> --options`):
+
+| `[review] plan` | Other model usable | Same agent usable | Recommended |
+|---|---|---|---|
+| `auto` (default, also with no config) | yes | — | External |
+| `auto` | no | yes | Same agent (the reason is shown) |
+| `codex` / `claude` | that CLI usable | — | That CLI (external or same agent) |
+| `codex` / `claude` | no | — | The next usable one, as for `auto` |
+| any but `off` | no | no | No review |
+| `off` | — | — | No review (the reviews are still offered) |
 
 | Reviewer | `--reviewer` | Who reviews |
 |---|---|---|
@@ -92,6 +105,8 @@ beside a ralphex prompt, so the user always sees one open question.
 | Same agent | `same` | The executor model, read-only |
 | By name | `codex`, `claude` | That CLI |
 
+0. Ask which review to run (`autopilot-plan` Step 5), in plain text with
+   an `ask-timer` for `review_pick`, never with a blocking question tool.
 1. `AP review-plan <plan> --reviewer external|same --session <session>
    --task "<task description>"`. It runs the reviewer read-only (Codex:
    `<codex_command> exec --sandbox read-only`; Claude: `--permission-mode
@@ -119,7 +134,8 @@ status` to check it.
 
 Honor "skip the plan review", "skip the Codex review" and "skip the Claude
 review": go on without it and log the user's choice. For no review offer at
-all, set `[review] plan = off` through setup. Keep external code-review
+all by default, set `[review] plan = off` through setup: "No review" is
+then the recommended option. Keep external code-review
 skips separate: `skip-review` controls the runner's external review only.
 
 The user can also ask any time: "review the plan with codex" →

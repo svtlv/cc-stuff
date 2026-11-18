@@ -4,7 +4,7 @@ description: This skill should be used when the user runs "/autopilot-setup" or 
 argument-hint: "[tools | key | repo | reconfigure] (default: all, or reconfigure when the repository is already set up)"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion
 metadata:
-  version: "0.4.0"
+  version: "0.5.0"
 ---
 
 # Autopilot Setup
@@ -12,6 +12,11 @@ metadata:
 Guide the user through a complete setup of the autonomous plan runner
 (ralphex.windows) and the model router (agrouter): install or upgrade both,
 store the classifier key globally, and configure the current repository.
+
+The repository gets full configs for all three tools: `.ralphex/config`,
+`.agrouter/config` and `.autopilot/config`. They are committed, so a clone
+runs the same way for a user with no global config. Only the classifier key
+stays outside the repository.
 
 ```
  1 check ─► 2 install/upgrade ─► 3 classifier + key ─► 4 repo config ─► (4b response times) ─► 5 verify
@@ -56,7 +61,7 @@ Run `AP doctor --json --latest` from the repository root. Show a status table:
 | Model router | `router.version` | `latest.router` | install / upgrade / ok |
 | claude / codex CLIs | `reviews.claude`, `reviews.codex` | — | usable / missing / logged out / disabled |
 | Classifier key | `router_config.key_set` (+ provider) | — | set / missing |
-| Repo config | `cli_config.local_exists`, `uses_router` | — | configured / missing |
+| Repo configs | `cli_config.local_exists`, `router_config.local_exists`, `autopilot_config.local_exists`, `uses_router` | — | configured / missing (per file) |
 | Routing docs in sync | `cli_config.doc_drift` | — | ok / resync `claude_args` |
 
 When `latest` is null (offline), say so and continue with installed versions.
@@ -65,7 +70,8 @@ When `latest` is null (offline), say so and continue with installed versions.
 (`cli_config.local_exists`) and the argument is empty or `reconfigure`,
 switch to **reconfigure mode** (next section) instead of running Stages 2–4
 in full. Tools and key problems from the table above are offered as
-properties there.
+properties there. A missing or partial repository config is one of the
+summary's issues: offer to write or upgrade it first.
 
 ## Reconfigure Mode
 
@@ -106,8 +112,10 @@ Offer to disable a missing or unwanted CLI for routing in Stage 4.
      manager (show the line; nothing is stored);
    - store it later (skip; routing will not work until then).
 3. Write the global config per `config-recipes.md` ("Classifier and Key").
-   For OpenAI also set `[agrouter] classifier_provider = openai`. Never write
-   the key into `.agrouter/config` or any file inside a repository.
+   For OpenAI also set `[agrouter] classifier_provider = openai`. Stage 4
+   writes the provider into `.agrouter/config` too. Never write the key
+   into `.agrouter/config` or any file inside a repository (`config-set`
+   refuses it).
 4. Do not echo the key back. Confirm with `AP doctor --json` that
    `router_config.key_set` is true.
 
@@ -165,20 +173,34 @@ value (from `AP config-summary`) as the "keep" option. Ask, in order:
      `none`.
    - **Plan review**: after ralphex writes the plan, autopilot offers one
      read-only review of it, as `/planning:make` does: external (the other
-     model, `plan_review.cross_model`) or same agent. This key sets the
-     recommended reviewer. Recommend `auto` (external) when that model is
-     usable, otherwise `off` (recommends no review). Write it with
+     model, `plan_review.cross_model`) or same agent. Autopilot always asks
+     which review to run. This key sets the recommended option, which is
+     taken after the `review_pick` time so the flow never blocks. Offer
+     `auto` (Recommended: the other model, or the same agent when the other
+     model is not usable), `codex`, `claude` or `off` (recommend no
+     review). Write it with
      `AP config-set .autopilot/config plan --section review --value auto`.
-     Honor a request to skip either model's review. An existing enabled
-     review whose CLI is unavailable is skipped without blocking the run;
-     offer to fix that CLI or set plan review to `off`.
+     Honor a request to skip either model's review.
 7. **Wait on limits**: wait 15 minutes and retry (Recommended) or stop.
+8. **Publish**: after a run, push the branch and open a pull request into
+   the branch the run started from (Recommended), push only, or keep it
+   local. Write `AP config-set .autopilot/config mode --section publish
+   --value pr|push|off`, and `draft = true` when the team wants drafts.
+   Say what the pull request needs: `gh` (GitHub) or `glab` (GitLab)
+   installed and logged in (`gh auth status`); without it, runs push only.
 
-Then write the files, explaining each change with `--comment`:
+Then write the files, explaining each change with `--comment`. Write all
+three configs every time, also when a global config already has the values:
+teammates and CI may have no global config.
 
-1. `AP config-init` — `.ralphex/config` from the runner's commented
-   template (never the runner's `--init`, which also copies `agents/` and
-   `prompts/`).
+1. `AP config-init --tool ralphex`, `AP config-init --tool agrouter` and
+   `AP config-init --tool autopilot`: each writes the tool's full commented
+   template (`.ralphex/config`, `.agrouter/config`, `.autopilot/config`)
+   with every value commented out. Never use the runner's `--init`, which
+   also copies `agents/` and `prompts/`. A full file is kept. A partial
+   file (written by hand, `doctor.repo_configs` shows `partial`) is
+   upgraded with `--merge`: the template plus every current value and the
+   comments above it. The old file is backed up in the state directory.
 2. Set the keys of the matching recipe in `config-recipes.md` with
    `AP config-set .ralphex/config <key> --value <v> --comment "<why>"`.
    List folder docs file by file in `claude_args`. Use `:` for routed specs,
@@ -188,33 +210,47 @@ Then write the files, explaining each change with `--comment`:
    setup's external review):
    `AP install-wrapper --docs <files> --doc-dirs <folders>` (adds the
    Windows pair on Windows), then set `codex_command` to the returned path.
-4. When the chosen docs exceed about 60 KB in total (sum file sizes),
-   offer the long-context limits for this repository ("Large Doc Sets") and
-   write them to `.agrouter/config`. Write `[cli.<name>] enabled = false`
-   there too when a CLI is missing or unwanted. Never a key.
-5. Add `.ralphex/progress/` to `.gitignore` when missing.
-6. Show the result with `AP config-show` for each written file, then run
+4. Set the router keys from "Recipe: Repository Router Config" in
+   `config-recipes.md`: the classifier provider, the Codex quota prefix,
+   `[cli.<name>] enabled = false` for a missing or unwanted CLI and, when
+   the chosen docs exceed about 60 KB in total (sum file sizes), the
+   long-context limits ("Large Doc Sets"). Never a key.
+5. Set `[review] plan` (question 6) and `[publish] mode` (question 8) in
+   `.autopilot/config`. Response times
+   (Stage 4b) go there too when the user changes them for this repository.
+6. Do not edit the root `.gitignore`. The runner writes
+   `.ralphex/.gitignore` (`progress/`, `worktrees/`) and the router writes
+   `.agrouter/.gitignore` (`logs/`). Commit both.
+7. Show the result with `AP config-show` for each written file, then run
    `AP doctor --json`: `cli_config.executor` must match the choice,
-   `cli_config.spec_problems` must be empty and `reviews.execution.usable`
-   must be true (it checks login, `codex_command` and the sandbox); fix any
-   listed key.
+   `cli_config.spec_problems` must be empty, `repo_configs` must show
+   `full` for every file, `setup_incomplete` must not list a repository
+   config, and `reviews.execution.usable` must be true
+   (it checks login, `codex_command` and the sandbox); fix any listed key.
 
 Finally recommend committing the files ("Committing"), and explain why: an
-uncommitted config blocks runs on the default branch. Keeping them local is
-the alternative.
+uncommitted config blocks runs on the default branch, and teammates need it.
+Keeping them local is the alternative.
 
-## Stage 4b — Response Times (optional, global)
+## Stage 4b — Response Times (optional)
 
 Show `AP policy` as a short table (decision, wait, reminder) and ask:
-keep the defaults (Recommended), or change some. For changes, write each
-key to the user's config, which applies to every repository:
+keep the defaults (Recommended), or change some. For changes, ask where
+they apply:
+
+| Option | File |
+|---|---|
+| This repository, committed (Recommended) | `.autopilot/config` |
+| Only this user, every repository | `~/.config/autopilot/config` |
 
 ```
-AP config-set ~/.config/autopilot/config decide --section timeouts --value 2h
+AP config-set .autopilot/config decide --section timeouts --value 2h
 ```
 
-Values: `90s`, `10m`, `1h`, `never`; `<key>.remind` sets the reminder
-(details in `../autopilot/references/response-times.md`).
+The repository file wins over the user's file. Values: `90s`, `10m`, `1h`,
+`never`; `<key>.remind` sets the reminder (details in
+`../autopilot/references/response-times.md`). The template from
+`config-init --tool autopilot` lists every key with its default.
 
 ## Stage 5 — Verify
 

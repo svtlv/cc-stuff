@@ -23,7 +23,8 @@ then builds it under supervision.
 | Setup | `/autopilot:autopilot-setup [tools\|key\|repo]` | `$autopilot-setup` | Installs or upgrades both tools, stores the classifier key globally, and writes this repository's config with routed, pinned or fixed models. |
 
 Flags after `--` go to the runner unchanged, for example
-`/autopilot:autopilot-run docs/plans/cache.md -- --worktree`.
+`/autopilot:autopilot-run docs/plans/cache.md -- --tasks-only`. `-- --worktree`
+means a new worktree, which autopilot makes in `<parent>/workspaces/<repo>/<Name>`.
 
 ## How It Works
 
@@ -58,15 +59,17 @@ a waiting chat costs no tokens.
 | Run fails (crash, kill, network) | Restarted after 30 s, 60 s, 120 s … up to 5 times; finished tasks are kept. |
 | Codex can't do the external code review (not installed, logged out) | Setup tells you up front; runs skip the review automatically and say why. If Codex fails mid-review, the run restarts without it, keeping finished tasks. |
 | You want to skip the external review | Say so: before the run it starts without it; during the run it ends the review at once (ralphex's manual break) or as soon as the review starts. |
-| Plan review | After ralphex writes the plan, autopilot offers one read-only review, as `/planning:make` does: external (Codex in the Claude setup, Claude in the Codex setup) or same agent. You see each finding with an assessment and pick which to apply. Drafts are not reviewed by another model, so planning stays one question at a time. |
+| Plan review | After ralphex writes the plan, autopilot asks which read-only review to run, as `/planning:make` does: external (Codex in the Claude setup, Claude in the Codex setup), same agent, your own edit, or none. One option is recommended (external by default, the same agent when the other model is unavailable), and it is taken after 10 minutes without a reply, so the flow does not stop. You see each finding with an assessment and pick which to apply. Drafts are not reviewed by another model, so planning stays one question at a time. |
+| Where the implementation runs | Autopilot checks the checkout first. When you planned on the default branch, it recommends a new worktree in the shared workspaces folder (`~/Projects/workspaces/<repo>/<Name>`; an existing worktree for the branch is reused, whatever tool made it), so your checkout never switches branch and stays free for more planning. The uncommitted plan and repository configs are copied and committed there. When you are already in a worktree or on a feature branch, it recommends staying there, because ralphex makes worktrees only from the default branch. No reply in 60 minutes means the recommended place. |
 | Only Codex is available | Setup recommends Codex and skips unavailable Claude plan reviews. Claude availability includes login and router checks. A Claude-configured session can fall back to Codex when its sandbox and routing support execution; otherwise setup explains what to change. |
 | You want to skip a plan review | Say "skip the Claude review", "skip the Codex review", or "skip the plan review". The plan is kept as written and the skip is logged. A missing or logged-out reviewer is skipped automatically. |
 | Usage limit | ralphex retries the same step every 15 minutes (autopilot adds `--wait` when your config lacks `wait_on_limit`); if ralphex exits instead, autopilot waits until the reported reset time and restarts. You see which tool is limited and when it resets, never a false "hung" or error. A reset hours away gets a decision with a 5-minute default: continue on Codex, skip the limited external review, or wait. |
 | Same error three times with no progress | The driver stops; the agent diagnoses and fixes. |
 | Driver gives up (fatal error, restart limit) | The agent recovers on its own: known fixes (worktree instead of a dirty tree, stale worktree cleanup, config fixes, router bypass when the key fails) or a diagnosed code/plan fix committed on the run's branch, then starts again. Up to 3 rounds; never destructive git commands. |
-| You don't answer | Each question has a recommended answer, chosen with a reason, and a response time that fits it: 10 min for planner questions, 30 min for the plan draft, 60 min to decide whether to implement (reminders before the long ones; say "wait" for more). Then the recommendation is taken and the work continues to the end. Times are configurable in `~/.config/autopilot/config`. Installing software and credentials always wait for you. |
+| You don't answer | Each question has a recommended answer, chosen with a reason, and a response time that fits it: 10 min for planner questions, 30 min for the plan draft, 60 min to decide whether to implement (reminders before the long ones; say "wait" for more). Then the recommendation is taken and the work continues to the end. Times are configurable in the repository's `.autopilot/config` (committed) or your `~/.config/autopilot/config`. Installing software and credentials always wait for you. |
 | You ask about or change the run mid-way | The chat that started it stays in charge: it answers from the log and the branch's commits while the run continues. Code, plan or model changes go through a safe point: "pause after this task", change, "resume". |
 | The chat hits its own usage limit, or you open a new chat | The run continues by itself. When no chat has watched for 10 minutes and there is news, the supervisor types a wake line into the chat's terminal tab (Orca tab, tmux, WezTerm, kitty, iTerm2, or your own `[wake] command`), which works for Claude Code, Codex or any other agent CLI; otherwise it shows a desktop notification. The chat then posts the updates you missed. |
+| Run finished | Autopilot pushes the run branch and opens a pull request into the branch the run started from (for example `master` for a worktree run planned on `master`), or into the default branch when that branch is not on the remote. An open pull request is reused, and a run that did not finish opens a draft. It needs `gh` or `glab`; without them it pushes only. Set `[publish] mode = push` or `off` in `.autopilot/config` to change this. |
 | Flow ends (any outcome) | A short report in two main parts: first every decision made without you (with why and how to change it), then the goal and what was done. Open items follow only when you must act. Saved next to the session state. |
 
 In hosts that notify on background commands (Claude Code) the monitor runs
@@ -106,18 +109,23 @@ Run `/autopilot:autopilot-setup` (or `$autopilot-setup`) directly. It walks thro
    the repository.
 4. **Repository config** — executor (Claude Code or Codex), model selection
    (full routing, pinned model with routed effort, fixed models, or no
-   router), project docs for routing, external review, and limit waiting.
-   The recommended result:
+   router), project docs for routing, external review, plan review, and
+   limit waiting. Setup always writes full configs for all three tools, so
+   a clone works for a user with no global config:
 
    ```
-   .ralphex/config                     commented template, routed keys explained
-   .ralphex/scripts/codex-agrouter.sh  external Codex review through agrouter
-   .agrouter/config                    long-context limits, only for large doc sets
+   .ralphex/config                     runner template, routed keys explained
+   .ralphex/scripts/codex-agrouter.sh  Codex through agrouter
+   .agrouter/config                    router template: classifier provider, Codex quota prefix,
+                                       disabled CLIs, long-context limits for large doc sets
+   .autopilot/config                   autopilot template: recommended plan review, response times
    ```
    **Note:** on Windows the wrapper is `codex-agrouter.cmd` plus
-   `codex-agrouter.py`. These files are safe to commit; the classifier key stays in
-   your global config. Setup recommends committing them, because ralphex
-   will not start on the default branch with uncommitted config.
+   `codex-agrouter.py`. These files are safe to commit; the classifier key
+   stays in your global config or environment, and setup refuses to write
+   it into the repository. Setup recommends committing them, because
+   teammates need them and ralphex will not start on the default branch
+   with uncommitted config.
 5. **Verify** — one routing request to confirm the key and config.
 
 On a repository that is already set up, setup switches to **reconfigure
@@ -126,7 +134,8 @@ from (this repository, your global config, or built in), lists issues such
 as doc drift, and changes only the properties you pick — executor, phase
 models, routing docs, router on/off, external review, limits, large-doc
 routing, routable CLIs, classifier and key, response times, tool versions.
-It then shows the diff and offers to commit or undo. Hand-written wrapper
+A missing `.agrouter/config` or `.autopilot/config` is listed as an
+issue and offered first. It then shows the diff and offers to commit or undo. Hand-written wrapper
 scripts are never overwritten without asking.
 
 ## Requirements
@@ -194,6 +203,6 @@ other way round.
   (or a `[wake] command`); elsewhere you get a desktop notification on macOS
   and Linux, none on Windows. A closed terminal leaves the run going; the
   hooks or `/autopilot-run` pick it up in the next chat in the repository.
-- Restarts rely on the runner resuming from the first unchecked task; a run
-  in `--worktree` mode that is interrupted keeps its worktree, which blocks a
-  restart until it is removed (reported as a fatal error with the fix).
+- Restarts rely on the runner resuming from the first unchecked task. A run
+  in a new worktree restarts in place in its folder; the folder is kept
+  after the run until you remove it.

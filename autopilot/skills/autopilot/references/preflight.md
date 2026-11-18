@@ -30,8 +30,9 @@ models.
 
    Do not offer to continue without the tools: the runner cannot start, and
    a config that calls the router fails on the first task.
-3. **`setup_incomplete` is not empty** (no classifier key, or no repository
-   config). Mention each item in one line and ask: run setup now
+3. **`setup_incomplete` is not empty** (no classifier key, or a missing
+   repository config: `.ralphex/config`, `.agrouter/config` or
+   `.autopilot/config`). Mention each item in one line and ask: run setup now
    (Recommended), or continue with the current settings. Without a reply
    within the `preflight` response time (10 min, `response-times.md`),
    continue with the current settings and log it; setup needs
@@ -55,7 +56,7 @@ directory) in full and follow it, or load it by name where the host can
 |---|---|
 | Any tool | none (all stages) |
 | Only the key | `key` |
-| Only the repository config | `repo` |
+| Only a repository config (any of the three files) | `reconfigure` when `.ralphex/config` exists (it offers the missing files first), else `repo` |
 
 After setup finishes, run `AP doctor --json` again. When `missing_tools`
 is now empty, continue the original request with its original arguments

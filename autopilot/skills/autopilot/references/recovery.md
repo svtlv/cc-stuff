@@ -20,7 +20,7 @@ or the same error three times.
 
 | Signal in `last_error` / `recent_errors` | Fix | Safe without asking |
 |---|---|---|
-| `uncommitted changes` / `cannot create branch` | Start again with `-- --worktree` (the worktree ignores uncommitted files). Never stash or discard the user's changes. | yes |
+| `uncommitted changes` / `cannot create branch` | Start again with `--new-worktree` (the new folder ignores the uncommitted files here). Never stash or discard the user's changes. | yes |
 | `worktree already exists` | Check that no session runs it (`AP list`). Keep the worktree: when `git -C <worktree> status --porcelain` shows changes, commit them inside it (`git -C <path> add -A && git -C <path> commit -m "wip: autopilot recovery"`). Then start the same run again with `-- --worktree`. The driver sees the branch already holds the plan and continues inside that worktree without `--worktree`, so ticked tasks stay ticked. Never remove the worktree to let the runner recreate it: it would copy the unticked source plan over the branch's progress and redo finished tasks. | yes |
 | `restarting would lose the progress on the run branch` | `use_worktree = true` is set in a runner config, so the driver cannot resume the branch safely. Ask before changing config: set `use_worktree = false` in `.ralphex/config` (or remove it), then start again with `-- --worktree`. | no |
 | `unfinished git operation` (merge, rebase) | Show `git status`. Never abort another person's merge or rebase. | no |

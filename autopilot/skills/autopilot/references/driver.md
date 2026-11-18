@@ -28,7 +28,7 @@ wrapper pair, Python selection and review-skip recovery.
 |---|---|
 | `doctor --json [--latest]` | `cli_config.executor` and `cli_config.spec_problems` (phase specs naming the other executor's models), `host` hint (name, sandboxed, network_disabled) and `state_dir`, tools, versions, config locations, effective runner settings, router key presence (never the key), repo cleanliness, active sessions, plus `missing_tools` (runner or router not installed) and `setup_incomplete` (no key, no repo config) for the setup gate in `preflight.md`. `--latest` asks GitHub for the newest releases. |
 | `plan --desc TEXT [--flow ID] [--max-restarts N] [-- CLI ARGS]` | Start plan creation (`--plan TEXT`). Default 2 restarts. Prints `session` and `flow`. |
-| `run --plan PATH [--flow ID] [--max-restarts N] [-- CLI ARGS]` | Start plan execution. Default 5 restarts. Reuse the flow id of the plan and of earlier runs. |
+| `run --plan PATH [--new-worktree] [--worktree-path DIR] [--flow ID] [--max-restarts N] [-- CLI ARGS]` | Start plan execution. Default 5 restarts. Reuse the flow id of the plan and of earlier runs. `--new-worktree` makes `<parent>/workspaces/<repo>/<Name>` with `git worktree add` (`[worktree] path` changes it) or reuses the branch's existing worktree, copies and commits an uncommitted plan and repository configs there, and runs inside it; the session keeps `source_repo`, so this folder's chat, `list` and the hooks still find it. A runner `--worktree` flag is turned into `--new-worktree`. Refuses a place `place` marks unusable. |
 | `next SESSION [--timeout S] [--catch-up] [--json]` | The chat's watch call. `--catch-up` (reattach) also returns an open prompt an earlier watch reported. Blocks until a prompt the chat has not seen, a notable event, the end, or `S` seconds (default 6900, under the 2 h background limit). Continues after the last reported event on its own. Prints short text (see "The `next` Report"); `--json` prints the `wait` report. |
 | `wait SESSION [--since SEQ] [--timeout S] [--any]` | The full JSON report, for diagnosis and tests. Blocks like `next` or until `S` seconds pass (default 240). `--any` also returns on phase changes. |
 | `answer SESSION ... [--text-file F] [--by user\|agent] [--reason TEXT]` | Answer the prompt the session waits on (see below). `--text-file` reads the text from a file, so `$`, quotes and backticks reach the runner unchanged. |
@@ -48,13 +48,15 @@ wrapper pair, Python selection and review-skip recovery.
 | `report [SESSION] [--flow ID]` | Every session of a flow (with executor and `models_used` call counts), the merged decision log, `timeouts` (every choice taken without a reply: question, chosen, `waited_min`, `recommended` false when the driver fell back to the first option or a blind accept, reason), `without_user` (every decision the user did not make: by `auto`, `agent`, `autopilot`, `agrouter` or `ralphex`, notes left out), and the branch's commits and diffstat: input for the final report. |
 | `stop SESSION` | Interrupt the CLI gracefully, then kill its process tree. |
 | `list [--all]` | Sessions of this repository (`--all`: every repository). |
-| `config-set FILE KEY [--section S] (--value V \| --value-stdin) [--private]` | Set one INI key, uncommenting a template line when one exists. `--private` makes the file 0600 and its directory 0700. Use `--value-stdin` for secrets. |
+| `config-set FILE KEY [--section S] (--value V \| --value-stdin) [--private]` | Set one INI key, uncommenting a template line when one exists. `--private` makes the file 0600 and its directory 0700. Use `--value-stdin` for secrets. Refuses a secret key (`api_key`, tokens, passwords) in a file inside the repository. |
 | `config-set ... --comment TEXT` | Also write full-line `# TEXT` comments right above the key (once). |
-| `config-init [DEST] [--force]` | Copy the runner's commented default config (only `config`, not `agents/` or `prompts/`) to `.ralphex/config`. Keeps an existing file. |
+| `config-init [DEST] [--tool ralphex\|agrouter\|autopilot] [--force]` | Write the tool's full commented default config to `.ralphex/config` (runner: only `config`, not `agents/` or `prompts/`), `.agrouter/config` (router: its embedded defaults, made in a temporary config directory with no key) or `.autopilot/config` (every key with its default). Keeps an existing file; `--merge` upgrades a partial (hand-written) one to the template with its current values and comments, backing up the old file in the state directory. `doctor.repo_configs` shows each file as `missing`, `partial` or `full`. |
 | `install-wrapper --docs F... --doc-dirs D... [--windows] [--force]` | Install the Codex-through-router wrapper into `.ralphex/scripts/` and print the `codex_command` value. |
 | `config-show FILE` | Active INI lines with secret values shown as `<set>`. |
 | `plan-rev snapshot\|diff\|supersede PLAN [--by NEW]` | Revisions of a finished plan: snapshot before a change; diff against the last snapshot (with task counts, `checked_boxes_lost` and the check verdict); supersede an old plan by a re-planned one (backup kept, `git rm` when committed). See `plan-revision.md`. |
-| `review-plan PLAN [--task TEXT] [--reviewer external\|same\|codex\|claude] [--session S] [--executor codex\|claude] [--timeout S]` | Read-only review of a finished plan, routed when the repository routes: `status`, numbered `findings` (`n`, `severity` CRITICAL/MAJOR/MINOR, `text`, from stdout only), `no_findings`, the output file. `--session` uses that session's executor and logs the outcome. An unavailable reviewer returns `ok: false`, `skipped: true`, and `reason`. See `reviews.md`. |
+| `publish RUN_SESSION [--mode pr\|push\|off] [--base B] [--title T] [--body-file F] [--draft]` | Push the run branch (from its worktree when it has one; never forced) and open a pull request with `gh` (GitHub) or `glab` (GitLab), or reuse an open one. Base: the branch the run started from (`start_branch`); for a run on a feature branch, the branch it was created from (reflog); the default branch when that base is not on the remote. Draft when the run did not finish. Returns `branch`, `folder`, `base`, `base_why`, `commits`, `uncommitted`, `pushed`, `pr` (`url`, `created`, `draft`) or `skipped` with the reason, and logs the outcome. Default mode: `[publish] mode`, else `pr`. |
+| `place [--plan PLAN]` | Where the implementation run should work: `checkout` (`main checkout` or `worktree`), `branch`, `default_branch`, `dirty` (without the plan), `operation`, `use_worktree`, `recommended` (`worktree`, `here` or null), `why`, and `options` (recommended first, each with `run_args` for `run`, `usable`, `reason`, `text`; the worktree option also has its `path`). `run` refuses a place that is not usable (for example a new worktree from a feature branch), unless `--force`. |
+| `review-plan PLAN [--task TEXT] [--reviewer external\|same\|codex\|claude] [--session S] [--executor codex\|claude] [--timeout S] [--options]` | `--options`: run nothing; print the review question's `options` (usable or not, with the reason), the `recommended` option, `recommended_why` and the `review_pick` time. Otherwise: read-only review of a finished plan (no `--reviewer`: the recommended one), routed when the repository routes: `status`, numbered `findings` (`n`, `severity` CRITICAL/MAJOR/MINOR, `text`, from stdout only), `no_findings`, the output file. `--session` uses that session's executor and logs the outcome. An unavailable reviewer returns `ok: false`, `skipped: true`, and `reason`. See `reviews.md`. |
 | `skip-review SESSION [--by user\|agent] [--reason TEXT]` | Skip the run's external code review: SIGQUIT now if it runs, queued until it starts otherwise (restart without it on Windows). |
 | `check-plan FILE` | Can the runner execute this file: `verdict` (`ready`, `warnings`, `redesign`), `status` (`not started`, `in progress`, `complete`), `problems`, `warnings`, the tasks with checkbox counts. Mirrors the runner's parser. See `plan-check.md`. |
 | `config-summary` | The repository's setup property by property (executor, phase models with source local/global/default and mode, docs and wrapper style, router, external review, limits, local router limits, classifier, response-time overrides), issues and file git states. |
@@ -68,7 +70,7 @@ installed, with an error that names the missing tools and points to
 `autopilot-setup`.
 
 Pass extra runner flags after `--`, for example
-`run --plan docs/plans/x.md -- --worktree` or `plan --desc "..." -- --plan-model=opus:high`.
+`run --plan docs/plans/x.md -- --tasks-only` or `plan --desc "..." -- --plan-model=opus:high`.
 Always run `plan` and `run` from the repository root.
 
 Sessions live in `~/.local/state/autopilot/sessions/<id>/`
@@ -178,6 +180,10 @@ attempt 1: ralphex <plan> --worktree ─► creates branch + worktree, ticks Tas
 attempt 2: branch holds the plan? ─yes─► cwd .ralphex/worktrees/<branch>, ralphex <plan> (no --worktree)
                                   └─no──► ralphex <plan> --worktree again
 ```
+This applies to older sessions started with the runner's own `--worktree`.
+New runs use `--new-worktree` instead and restart in place inside their
+folder.
+
 **Note:** with `--worktree` the runner copies an uncommitted source plan into
 a new worktree, over the branch's ticked copy. So once the branch holds the
 plan, the driver continues inside the branch's worktree (recreating it

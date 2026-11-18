@@ -98,22 +98,27 @@ asked), `--waited` (minutes, `waited_min` from `ask-timer`) and `--reason`
 own section.
 
 ```
-AP log <session> --kind decision --by auto --question "Implement the plan now?" --waited 60 --text "Implement now" --reason "plan accepted, 6 tasks, tests included"
+AP log <session> --kind decision --by auto --question "Implement the plan now?" --waited 60 --text "Implement in a new worktree" --reason "plan accepted, 6 tasks, tests included; planned on master"
 AP log <session> --kind recovery --text "Committed WIP in the worktree, resumed its branch" --reason "worktree already exists"
 AP log <session> --kind fix --text "a1b2c3d: pin protobuf to 4.x" --reason "codegen broke on 5.x"
 ```
 
 ## Update Formats
 
-Post the update lines of `next` exactly as written, one line each, in order:
+Post the update lines of `next` exactly as written, in order. Task updates
+have a second line: `Plan:` (the task's planned steps) on start, `Done:`
+(the ticked steps and the files the commit changed) on finish:
 the same event always reads the same way, so a run's chat is a clean
 timeline. Do not paraphrase `activity`, add "still working" lines or
 re-post the task list. A sample run:
 
 ```
 ▶ Task 1/13 started: Data model and schema migration · claude-opus-5-5 (xhigh) · steps 0/67
+   Plan: add DigestSetup model; add migration 0042; write model tests (+3 more)
 ✓ Task 1/13 done in 9 min: Data model and schema migration · claude-opus-5-5 (xhigh) · steps 6/67 · 3f2a1c9 Add digest setup model
+   Done: add DigestSetup model; add migration 0042; write model tests (+3 more) · 4 files (+212 -3): models.py, 0042_digest.py, test_models.py, admin.py
 ▶ Task 2/13 started: Seed migration for today's digest · claude-opus-5-5 (xhigh) · steps 6/67
+   Plan: seed today's digest from settings; test the seed (+1 more)
 ⚠ Attempt failed (transient): ERROR: claude execution: signal: killed. Restarting in 60 s (restart 1 of 5); finished tasks are kept.
 ⚠ Router fallback on Task 2/13: Seed migration for today's digest: Model routing timed out (classifier_timeout, classify stage). Not chosen by agrouter; runs on claude defaults: model claude-opus-5-5 (verified default), effort unknown (claude did not report it).
 ▶ Task 2/13 continued (iteration 3): Seed migration for today's digest · claude-opus-5-5 (default effort) [router fallback] · steps 8/67
@@ -123,8 +128,10 @@ re-post the task list. A sample run:
 ▶ External review: codex iteration 1 · gpt-6.1-sol (high)
 ✓ Run finished. Writing the final report.
 ```
-**Note:** every task gets a start line with the model the router picked,
-and a done line with its time, models and commit. When agrouter could not
+**Note:** every task gets a start line with the model the router picked
+and what it is going to do, and a done line with its time, models, commit
+and what it did. The plan file is not counted in the changed files: the
+runner commits its ticked boxes with the code. When agrouter could not
 route a step, a fallback line comes first: why routing failed, and the CLI
 defaults it ran on instead. Reviews get one line
 each, and commits outside tasks (review fixes) get their own line.

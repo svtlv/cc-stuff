@@ -30,10 +30,20 @@ config, applies to every repository), `default` (built in).
 | 10 | Classifier and key | typesafe, key set | global |
 | 11 | Response times | defaults | global |
 | 12 | Tool versions | installed vs latest (`doctor --latest`) | |
-| 13 | Plan review | off · would be codex (usable) | `.autopilot/config` |
+| 13 | Plan review | auto · recommends external (codex, usable) | `.autopilot/config` |
+| 14 | Publish | pr · `gh` logged in | `.autopilot/config` |
 
 List `issues` above the table with the recommended fix (for example doc
-drift → property 4). Mention the file states from `files`
+drift → property 4). For a missing repository config ("this repository
+has no router config" or "no autopilot config"), recommend writing it:
+`AP config-init --tool agrouter|autopilot`, then the keys from setup
+Stage 4 steps 4–5. For a partial one ("is partial"), recommend
+`AP config-init --tool <tool> --merge`: it keeps every current value and
+its comments, and backs up the old file. A missing
+`[agrouter] classifier_provider`, `[review] plan` or a wrong Codex quota
+prefix is fixed with `config-set`. Copy the values the user has in the
+global configs, so the repository keeps working the same way without
+them. Mention the file states from `files`
 (committed / modified / untracked).
 
 ## 2. Ask What to Change
@@ -57,9 +67,10 @@ current value as the first option ("keep").
 | 8 | Large-doc routing | Set or unset the "Large Doc Sets" keys in `.agrouter/config` (`AP config-set`/`config-unset` with `--section`). Never an API key there. |
 | 9 | CLIs for routing | Disable: `[cli.<name>] enabled = false` in `.agrouter/config`. Re-enable: unset the local key when only this repository disabled it; when the global router config disables it (`router_local.disabled_clis` lists it, the local file does not), write `enabled = true` locally, since unsetting falls back to the global `false`. Keep the executor's CLI enabled when it is routed. These switches affect routed calls only; a CLI run directly (No router) ignores them. |
 | 10 | Classifier and key | Setup Stage 3. |
-| 11 | Response times | Setup Stage 4b. |
+| 11 | Response times | Setup Stage 4b (this repository's `.autopilot/config`, or the user's global file). |
 | 12 | Tool versions | Setup Stage 2. |
-| 13 | Plan review | `AP config-set .autopilot/config plan --section review --value auto\|off\|codex\|claude`; recommend `auto` when `plan_review.cross_model_usable`, otherwise `off`. Show both CLIs' login/routing status and explain that unavailable reviewers are skipped. Honor manual skips (`../../autopilot/references/reviews.md`). |
+| 13 | Plan review | `AP config-set .autopilot/config plan --section review --value auto\|off\|codex\|claude`; recommend `auto`. Autopilot always asks which review to run; this key only sets the recommended option, taken after `review_pick` (`plan_review.recommended` shows it now). With `auto`, an unusable other model downgrades the recommendation to the same agent. Show both CLIs' login/routing status. Honor manual skips (`../../autopilot/references/reviews.md`). |
+| 14 | Publish | `AP config-set .autopilot/config mode --section publish --value pr\|push\|off`; `draft = true\|false`. Check `gh auth status` (or `glab auth status`) for `pr`. |
 
 Write with `--comment` explaining each new value, as the first setup did.
 Do not touch keys of properties the user did not pick, even when they look
@@ -67,7 +78,7 @@ odd; mention them instead.
 
 ## 4. Review, Verify, Commit
 
-1. Show what changed: `git diff -- .ralphex .agrouter` for tracked files,
+1. Show what changed: `git diff -- .ralphex .agrouter .autopilot` for tracked files,
    `AP config-show` for untracked ones.
 2. `AP doctor --json`: `spec_problems` empty, `doc_drift` null, executor as
    chosen.

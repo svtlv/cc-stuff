@@ -357,14 +357,19 @@ def parse_duration(text):
     return value
 
 
+def autopilot_config_paths(repo=None):
+    """Global then repository autopilot config; the repository file wins."""
+    paths = [Path(os.environ.get('AUTOPILOT_CONFIG') or Path.home() / '.config/autopilot/config')]
+    repo = repo or git_root()
+    if repo:
+        paths.append(Path(repo) / '.autopilot/config')
+    return paths
+
+
 def autopilot_config(section):
     """Merged [section] of ~/.config/autopilot/config (AUTOPILOT_CONFIG) and <repo>/.autopilot/config."""
-    files = [Path(os.environ.get('AUTOPILOT_CONFIG') or Path.home() / '.config/autopilot/config')]
-    repo = git_root()
-    if repo:
-        files.append(Path(repo) / '.autopilot/config')
     values = {}
-    for cfg in files:
+    for cfg in autopilot_config_paths():
         if cfg.exists():
             for sec, key, value in ini_active(cfg.read_text(encoding='utf-8')):
                 if sec == section:
@@ -395,10 +400,8 @@ def load_policy():
 
 def cmd_policy(args):
     emit({'policy': load_policy(),
-          'source': [s for s in (os.environ.get('AUTOPILOT_CONFIG') or
-                                 str(Path.home() / '.config/autopilot/config'),)
-                     if Path(s).exists()] + (['AUTOPILOT_TIMEOUTS']
-                                             if os.environ.get('AUTOPILOT_TIMEOUTS') else [])})
+          'source': [str(p) for p in autopilot_config_paths() if p.exists()]
+          + (['AUTOPILOT_TIMEOUTS'] if os.environ.get('AUTOPILOT_TIMEOUTS') else [])})
 
 
 def detach_kwargs():
@@ -507,6 +510,11 @@ def cmd_config_set(args):
         value = args.value if args.value is not None else ''
     if args.value_stdin and not value:
         die('no value on stdin')
+    repo = git_root()
+    if value and SECRET_KEY.search(args.key) and repo and \
+            path.resolve().is_relative_to(Path(repo).resolve()):
+        die(f'refusing to write the secret {args.key} into {path}: repository configs are '
+            'committed; store it in the global config or the environment')
     text = path.read_text(encoding='utf-8') if path.exists() else ''
     path.parent.mkdir(parents=True, exist_ok=True)
     if args.private and not WINDOWS:
@@ -531,12 +539,45 @@ def comment_out_values(text):
     return '\n'.join(out) + '\n'
 
 
-def cmd_config_init(args):
-    """Copy the runner's commented default config (only the config file) to DEST."""
-    dest = Path(args.dest)
-    if dest.exists() and not args.force:
-        emit({'ok': True, 'file': str(dest), 'created': False})
-        return
+CONFIG_DEST = {'ralphex': '.ralphex/config', 'agrouter': '.agrouter/config',
+               'autopilot': '.autopilot/config'}
+# a line each tool's template starts with: a file without it was written by hand (partial)
+TEMPLATE_MARK = {'ralphex': '# ralphex configuration', 'agrouter': '# agrouter embedded defaults',
+                 'autopilot': '# autopilot repository config'}
+
+
+def config_state(path, tool):
+    """missing, partial (hand-written, no template) or full (made from the tool's template)."""
+    path = Path(path)
+    if not path.exists():
+        return 'missing'
+    head = path.read_text(encoding='utf-8', errors='replace').splitlines()[:5]
+    return 'full' if any(l.strip().startswith(TEMPLATE_MARK[tool]) for l in head) else 'partial'
+
+
+def active_with_comments(text):
+    """[(section, key, value, comment)] for active keys; comment = the # lines right above."""
+    out, section, notes = [], None, []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            notes = []
+            continue
+        if line[0] in '#;':
+            notes.append(line.lstrip('#;').strip())
+            continue
+        m = HEADER_RE.match(line)
+        if m:
+            section, notes = m.group(2).strip(), []
+            continue
+        if '=' in line:
+            key, value = line.split('=', 1)
+            out.append((section, key.strip(), value.strip(), '\n'.join(notes) or None))
+        notes = []
+    return out
+
+
+def runner_template():
     cli = find_cli()
     if not cli:
         die('not installed: ralphex.windows; run the autopilot-setup skill first')
@@ -546,12 +587,118 @@ def cmd_config_init(args):
         src = tmp / 'config'
         if code != 0 or not src.exists():
             die(f'--dump-defaults failed: {out[-300:]}')
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(comment_out_values(src.read_text(encoding='utf-8')),
-                        encoding='utf-8')
+        return src.read_text(encoding='utf-8')
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    emit({'ok': True, 'file': str(dest), 'created': True})
+
+
+def router_template():
+    """The router's commented embedded defaults, as it writes them for a new global config.
+
+    agrouter installs that template on its first run into an empty AGROUTER_CONFIG_DIR. Run it
+    there, from an empty directory and with no key, so it reads no user config, sends no
+    classifier request (it fails with classifier_no_key) and never touches the real global file.
+    """
+    if not shutil.which(ROUTER):
+        die('not installed: agrouter; run the autopilot-setup skill first')
+    tmp = state_root() / f'router-{secrets.token_hex(4)}'
+    (tmp / 'cwd').mkdir(parents=True)
+    env = {k: v for k, v in os.environ.items() if k != 'AGROUTER_CLASSIFIER_API_KEY'}
+    env['AGROUTER_CONFIG_DIR'] = str(tmp / 'global')
+    try:
+        try:
+            res = subprocess.run(**command_kwargs([ROUTER, '--api-key=', '-p', 'template']),
+                                 capture_output=True, text=True, encoding='utf-8',
+                                 errors='replace', timeout=60, cwd=tmp / 'cwd', env=env,
+                                 stdin=subprocess.DEVNULL)
+            out = (res.stdout + res.stderr).strip()
+        except (OSError, subprocess.SubprocessError) as exc:
+            out = str(exc)
+        src = tmp / 'global' / 'config'
+        if not src.exists():
+            die(f'agrouter wrote no config template (upgrade agrouter): {out[-300:]}')
+        text = src.read_text(encoding='utf-8')
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    # a template holds no secret; clear any key value anyway before it reaches a repository
+    return re.sub(r'(?m)^(\s*[#;]?\s*api_key\s*=).*$', r'\1', text)
+
+
+def autopilot_template():
+    lines = ['# autopilot repository config: committed, shared by everyone who runs autopilot here.',
+             '# Layering: built-in defaults < ~/.config/autopilot/config (AUTOPILOT_CONFIG)',
+             '# < this file < AUTOPILOT_TIMEOUTS. Comments must be on their own lines.',
+             '', '[review]',
+             '# plan: the recommended review of a finished plan. autopilot always asks and takes',
+             '# this recommendation when review_pick passes without a reply.',
+             '#   auto  the other model (Codex in the Claude setup, Claude in the Codex setup);',
+             '#         the same agent when the other model is not usable',
+             '#   codex | claude  that CLI',
+             '#   off   recommend no review (the review is still offered)',
+             '# plan = auto',
+             '', '[publish]',
+             '# mode: what happens to the run branch before the final report',
+             '#   pr    push it and open a pull request against the branch the run started from',
+             '#         (the default branch when that branch is not on the remote)',
+             '#   push  push only;  off  keep it local',
+             '# mode = pr',
+             '# draft: open the pull request as a draft (always when the run did not finish)',
+             '# draft = false',
+             '', '[worktree]',
+             '# path: where a new worktree for a run goes (the workspaces layout by default).',
+             '#   {parent} the folder that holds this repository, {repo} its name,',
+             '#   {branch} the run branch, {Name} the branch with a capital first letter',
+             '# path = {parent}/workspaces/{repo}/{Name}',
+             '', '[timeouts]',
+             '# Response time per decision: 90s, 10m, 1h, 1h30m or never. After it the',
+             '# recommended answer is taken and logged. <key>.remind sets a reminder before it.']
+    for key, (timeout, remind, about) in POLICY.items():
+        lines.append(f'# {key}: {about}')
+        lines.append(f'# {key} = {fmt_duration(timeout)}')
+        if remind:
+            lines.append(f'# {key}.remind = {fmt_duration(remind)}')
+    return '\n'.join(lines) + '\n'
+
+
+def fmt_duration(seconds):
+    if seconds is None:
+        return 'never'
+    if seconds % 3600 == 0:
+        return f'{seconds // 3600}h'
+    if seconds % 60 == 0:
+        return f'{seconds // 60}m'
+    return f'{seconds}s'
+
+
+def cmd_config_init(args):
+    """Write a tool's full commented default config into the repository (nothing active yet).
+
+    --merge upgrades a partial (hand-written) file: the template is written and every active
+    key of the old file is set again in it, with the comment lines that stood above it.
+    """
+    dest = Path(args.dest or CONFIG_DEST[args.tool])
+    state = config_state(dest, args.tool)
+    if state != 'missing' and not args.force and not (args.merge and state == 'partial'):
+        emit({'ok': True, 'tool': args.tool, 'file': str(dest), 'created': False,
+              'state': state})
+        return
+    kept = active_with_comments(dest.read_text(encoding='utf-8')) \
+        if state == 'partial' and args.merge else []
+    text = comment_out_values({'ralphex': runner_template, 'agrouter': router_template,
+                               'autopilot': autopilot_template}[args.tool]())
+    for section, key, value, comment in kept:
+        text = ini_set(text, key, value, section, comment)
+    if kept:
+        # outside the repository, so the old file is never committed by accident
+        backup = state_root() / 'config-backups' / \
+            f'{dest.parent.name}-{dest.name}-{time.strftime("%Y%m%d-%H%M%S")}'
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(dest, backup)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(text, encoding='utf-8')
+    emit({'ok': True, 'tool': args.tool, 'file': str(dest), 'created': True,
+          'state': 'full', 'merged': [f'[{sec}] {k}' if sec else k for sec, k, _, _ in kept],
+          'backup': str(backup) if kept else None})
 
 
 def sh_literal(value):
@@ -947,6 +1094,11 @@ def cmd_config_summary(args):
     rall = merged(rpaths)
     provider = rall.get('agrouter', {}).get('classifier_provider', 'typesafe')
     policy, defaults = load_policy(), {k: v[0] for k, v in POLICY.items()}
+    drift = doc_drift(repo, eff.get('claude_args', ''), eff.get('codex_command')) \
+        if ROUTER in eff.get('claude_command', '') else None
+    issues = (missing_repo_configs(repo, eff) if cpaths[1].exists() else []) \
+        + spec_problems(executor, eff, router_catalog(repo)[0]) \
+        + ([f'doc drift: {drift}'] if drift else [])
     summary = {
         'configured': cpaths[1].exists(),
         'executor': dict(prop('executor', 'claude'), value=executor),
@@ -976,10 +1128,7 @@ def cmd_config_summary(args):
                                        or os.environ.get('AGROUTER_CLASSIFIER_API_KEY'))},
         'response_times': {k: v['timeout'] for k, v in policy.items()
                            if v['timeout'] != defaults[k]},
-        'issues': spec_problems(executor, eff, router_catalog(repo)[0]) + ([f'doc drift: {doc_drift(repo, eff.get("claude_args", ""), eff.get("codex_command"))}']
-                                                  if ROUTER in eff.get('claude_command', '')
-                                                  and doc_drift(repo, eff.get('claude_args', ''),
-                                                                eff.get('codex_command')) else []),
+        'issues': issues,
         'files': {f: tracked_state(repo, f) for f in
                   ('.ralphex/config', '.agrouter/config', '.autopilot/config',
                    (wrapper or {}).get('path') or '.ralphex/scripts/codex-agrouter.sh')},
@@ -1137,6 +1286,38 @@ def codex_fallback_args(cli_args):
     return result + ['--codex', '--plan-model=:', '--task-model=:', '--review-model=:']
 
 
+def plan_review_pick(pref, reviewer, executor, other, usable):
+    """The options of the plan review question and the one to take when nobody answers.
+
+    The user is always asked; the recommendation only keeps an unattended flow moving. It is
+    the configured reviewer when usable, else the next usable one (the other model, then the
+    executor), so a missing CLI downgrades the review instead of dropping it.
+    """
+    options = [
+        {'option': 'external', 'reviewer': other, 'usable': usable[other][0],
+         'reason': usable[other][1]},
+        {'option': 'same', 'reviewer': executor, 'usable': usable[executor][0],
+         'reason': usable[executor][1]},
+        {'option': 'edit', 'reviewer': None, 'usable': True, 'reason': None},
+        {'option': 'none', 'reviewer': None, 'usable': True, 'reason': None},
+    ]
+    if pref == 'off':
+        return {'options': options, 'recommended': 'none',
+                'recommended_why': '[review] plan = off'}
+    order = [reviewer] if reviewer in usable else []
+    order += [r for r in (other, executor) if r not in order]
+    for name in order:
+        if usable[name][0]:
+            option = 'external' if name == other else 'same'
+            why = (f'{name} reviews plans here' if name == reviewer
+                   else f'{reviewer} is not usable ({usable[reviewer][1]}); {name} reviews instead'
+                   if reviewer in usable else f'{name} reviews instead')
+            return {'options': options, 'recommended': option, 'recommended_why': why}
+    return {'options': options, 'recommended': 'none',
+            'recommended_why': 'no reviewer is usable: ' + '; '.join(
+                f'{n}: {usable[n][1]}' for n in (other, executor))}
+
+
 def review_capability(repo, cfg=None):
     """What can review here: the runner's external code review and autopilot's plan review."""
     cfg = cfg if cfg is not None else merged(cli_config_paths(repo)).get('', {})
@@ -1158,7 +1339,7 @@ def review_capability(repo, cfg=None):
         code = {'tool': 'custom', 'usable': ok, 'reason': None if ok else 'custom script missing'}
     else:
         code = {'tool': 'none', 'usable': False, 'reason': 'external review is off'}
-    pref = autopilot_config('review').get('plan', 'off')
+    pref = autopilot_config('review').get('plan', 'auto')
     other = 'codex' if executor == 'claude' else 'claude'
     reviewer = other if pref == 'auto' else (None if pref == 'off' else pref)
     usable = {'codex': (codex_ok, codex_why), 'claude': (claude_ok, claude_why)}
@@ -1167,6 +1348,7 @@ def review_capability(repo, cfg=None):
             'reason': (usable.get(reviewer, (False, 'unknown reviewer'))[1] if reviewer
                        else 'plan review is off'),
             'cross_model': other, 'cross_model_usable': usable[other][0]}
+    plan.update(plan_review_pick(pref, reviewer, executor, other, usable))
     fallback = 'codex' if executor == 'claude' and not claude_ok and codex_ok else None
     run_ok, run_why = usable[executor]
     if executor == 'codex' and run_ok:
@@ -1247,8 +1429,17 @@ def cmd_review_plan(args):
         cfg['executor'] = executor
     cap = review_capability(repo, cfg)
     executor = cfg.get('executor') or 'claude'
-    reviewer = {'external': cap['plan_review']['cross_model'], 'same': executor}.get(
-        args.reviewer, args.reviewer) or cap['plan_review']['reviewer'] or cap['plan_review']['cross_model']
+    if args.options:
+        pick = cap['plan_review']
+        emit({'plan': str(plan), 'executor': executor, 'setting': pick['setting'],
+              'recommended': pick['recommended'], 'recommended_why': pick['recommended_why'],
+              'options': pick['options'],
+              'review_pick': {'timeout_s': load_policy()['review_pick']['timeout']}})
+        return
+    pick = cap['plan_review']
+    default = {o['option']: o['reviewer'] for o in pick['options']}.get(pick['recommended'])
+    reviewer = {'external': pick['cross_model'], 'same': executor}.get(
+        args.reviewer, args.reviewer) or default or pick['reviewer'] or pick['cross_model']
     kind = 'same agent' if reviewer == executor else 'external'
     ok = cap['codex']['usable'] if reviewer == 'codex' else cap['claude']['usable']
     if not ok:
@@ -1353,6 +1544,47 @@ def effort_problem(key, value, model, effort, catalog):
             f'(router catalog), not "{effort}"']
 
 
+def repo_config_states(repo, cfg):
+    """{path: missing|partial|full} for the configs this repository needs."""
+    wanted = {'.ralphex/config': 'ralphex', '.autopilot/config': 'autopilot'}
+    if ROUTER in cfg.get('claude_command', '') + cfg.get('codex_command', '') or \
+            codex_routed(repo, cfg):
+        wanted['.agrouter/config'] = 'agrouter'
+    return {path: config_state(Path(repo) / path, tool)
+            for path, tool in sorted(wanted.items(), key=lambda i: list(CONFIG_DEST.values()).index(i[0]))}
+
+
+def missing_repo_configs(repo, cfg):
+    """Repository configs setup writes so a clone runs without any global config but the key."""
+    what = {'.ralphex/config': 'runner config', '.agrouter/config': 'router config',
+            '.autopilot/config': 'autopilot config'}
+    issues = []
+    for path, state in repo_config_states(repo, cfg).items():
+        if state == 'missing':
+            issues.append(f'this repository has no {what[path]} ({path}): run autopilot-setup repo')
+        elif state == 'partial':
+            issues.append(f'the {what[path]} ({path}) is partial (not from the template): '
+                          'run autopilot-setup to upgrade it with config-init --merge')
+    router = Path(repo) / '.agrouter/config'
+    if router.exists() and not any(sec == 'agrouter' and k == 'classifier_provider'
+                                   for sec, k, _ in ini_active(router.read_text(encoding='utf-8'))):
+        issues.append('the router config (.agrouter/config) does not set '
+                      '[agrouter] classifier_provider: users without a global config '
+                      'would route with the default provider')
+    if codex_routed(repo, cfg):
+        prefix = merged(router_config_paths(repo)).get(
+            'cli.codex.availability.limits', {}).get('error_prefix')
+        if prefix is not None and prefix.strip('"\'') != 'ERROR: agrouter: ':
+            issues.append(f'the Codex quota prefix is {prefix}, not "ERROR: agrouter: ": the '
+                          'runner would stop on a Codex limit instead of waiting; set it in '
+                          '.agrouter/config')
+    own = Path(repo) / '.autopilot/config'
+    if own.exists() and not any(sec == 'review' and k == 'plan'
+                                for sec, k, _ in ini_active(own.read_text(encoding='utf-8'))):
+        issues.append('the autopilot config (.autopilot/config) does not set [review] plan')
+    return issues
+
+
 def cmd_doctor(args):
     repo = git_root()
     cli = find_cli()
@@ -1414,8 +1646,12 @@ def cmd_doctor(args):
     incomplete = []
     if info['router']['path'] and not info['router_config']['key_set']:
         incomplete.append('classifier API key is not set')
-    if repo and not info['cli_config']['local_exists']:
-        incomplete.append('this repository has no runner config (.ralphex/config)')
+    apaths = autopilot_config_paths(repo)
+    info['autopilot_config'] = {'global': str(apaths[0]), 'global_exists': apaths[0].exists(),
+                                'local_exists': bool(repo) and apaths[-1].exists()}
+    if repo:
+        info['repo_configs'] = repo_config_states(repo, cfg)
+        incomplete += missing_repo_configs(repo, cfg)
     info['state_dir'] = str(state_root())
     if info['host']['network_disabled']:
         incomplete.append('the shell runs in a sandbox without network: run autopilot '
@@ -1488,6 +1724,11 @@ def cmd_catalog(args):
 
 # ---------------------------------------------------------------- sessions
 
+def in_repo(meta, repo):
+    """A session belongs to its folder and, for a run in a new worktree, to the source checkout."""
+    return repo in (meta.get('repo'), meta.get('source_repo'))
+
+
 def list_sessions(repo=None, all_repos=False):
     root = state_root() / 'sessions'
     out = []
@@ -1495,7 +1736,7 @@ def list_sessions(repo=None, all_repos=False):
         return out
     for d in sorted(root.iterdir(), reverse=True):
         meta = read_json(d / 'session.json')
-        if not meta or (not all_repos and repo and meta.get('repo') != repo):
+        if not meta or (not all_repos and repo and not in_repo(meta, repo)):
             continue
         st = read_json(d / 'state.json', {})
         out.append({'session': d.name, 'kind': meta['kind'], 'target': meta.get('target'),
@@ -1629,7 +1870,7 @@ def wake_mode():
     return mode if mode in ('type', 'notify', 'off') else 'type'
 
 
-def start_session(kind, target, cli_args, max_restarts, flow=None):
+def start_session(kind, target, cli_args, max_restarts, flow=None, extra=None):
     cli = require_tools()
     repo = git_root()
     if not repo:
@@ -1673,14 +1914,16 @@ def start_session(kind, target, cli_args, max_restarts, flow=None):
             added.append('--external-review-tool=none')
             review_note = code_review['reason']
     argv += added + cli_args
+    _, start_branch = run_quiet(['git', 'branch', '--show-current'], cwd=repo)
     write_json(sdir / 'session.json', {
+        'start_branch': start_branch or None,
         'kind': kind, 'target': target, 'repo': repo, 'argv': argv, 'cli_args': list(cli_args),
         'owner': host_session_id(), 'tab': own_tab(),
         'max_restarts': max_restarts, 'created': now(),
         'flow': flow or f'flow-{stamp}-{secrets.token_hex(2)}', 'executor': executor,
         'policy': load_policy(),
         'created_iso': time.strftime('%Y-%m-%dT%H:%M:%S'),
-        'repo_hash': hashlib.sha1(repo.encode()).hexdigest()[:8]})
+        'repo_hash': hashlib.sha1(repo.encode()).hexdigest()[:8], **(extra or {})})
     write_json(sdir / 'state.json', {'status': 'starting', 'seq': 0, 'events': []})
     if executor_note:
         log_decision(sdir, kind='decision', by='autopilot',
@@ -1723,10 +1966,88 @@ def cmd_run(args):
     if verdict['verdict'] == 'redesign' and not args.force:
         die('the runner cannot use this plan: ' + '; '.join(verdict['problems']) +
             '. Redesign it with the autopilot-plan skill (--redesign), or pass --force')
-    start_session('run', str(plan), args.cli_args, args.max_restarts, args.flow)
+    repo = git_root() or '.'
+    cli_args = list(args.cli_args)
+    new_worktree = args.new_worktree or bool(args.worktree_path)
+    if '--worktree' in cli_args:
+        # the runner's own worktree lands inside .ralphex/worktrees/; make it beside the folder
+        cli_args.remove('--worktree')
+        new_worktree = True
+    place = implementation_place(repo, plan=plan)
+    wanted = 'worktree' if new_worktree else 'here'
+    choice = next(o for o in place['options'] if o['option'] == wanted)
+    if not choice['usable'] and not args.force:
+        die(f"cannot run in {choice['text']}: {choice['reason']}. "
+            + (f"Recommended: {place['recommended']} ({place['why']})" if place['recommended']
+               else 'Fix it first') + '; see the place command')
+    extra = None
+    if new_worktree:
+        wt = prepare_worktree(repo, plan, cli_args, args.worktree_path)
+        os.chdir(wt['path'])
+        plan = Path(wt['plan']).resolve().relative_to(Path(wt['path']).resolve())
+        extra = {'source_repo': repo, 'worktree': wt}
+    start_session('run', str(plan), cli_args, args.max_restarts, args.flow, extra)
 
 
 # ---------------------------------------------------------------- supervisor
+
+def plan_branch(meta):
+    """The branch the runner makes for a plan: --branch, or the plan file name without its date."""
+    argv = meta['argv']
+    for i, arg in enumerate(argv):
+        if arg == '--branch' and i + 1 < len(argv):
+            return argv[i + 1]
+        if arg.startswith('--branch='):
+            return arg.split('=', 1)[1]
+    name = Path(meta['target']).name
+    name = name[:-3] if name.endswith('.md') else name
+    return re.sub(r'^[\d-]+', '', name).lstrip('-') or name
+
+
+def on_default_branch(repo, branch, cfg=None):
+    cfg = cfg if cfg is not None else merged(cli_config_paths(repo)).get('', {})
+    default = (cfg.get('default_branch') or default_branch(repo) or '').removeprefix('origin/')
+    return branch == default if default else branch in ('main', 'master')
+
+
+def run_work(meta):
+    """(branch, folder, base, base_why) of a run: where its commits are and what they fork from.
+
+    From the default branch the runner makes the plan's branch (in place or in a worktree), so
+    the base is the branch the run started on. On a feature branch it works on that branch; the
+    base is then the branch it was created from (its reflog), else the default branch.
+    """
+    repo = meta['repo']
+    start = meta.get('start_branch')
+    default = default_branch(repo) or ''
+    if meta.get('worktree'):
+        wt = meta['worktree']
+        return wt['branch'], wt['path'], wt['base'], f"the worktree was created from {wt['base']}"
+    if start and not on_default_branch(repo, start):
+        branch, base, why = start, None, None
+        _, log = run_quiet(['git', 'reflog', 'show', '--format=%gs', f'refs/heads/{start}'], cwd=repo)
+        created = re.findall(r'branch: Created from (\S+)', log or '')
+        source = created[-1] if created else None
+        if source and source not in ('HEAD', start) and \
+                run_quiet(['git', 'rev-parse', '--verify', '-q', source], cwd=repo)[0] == 0:
+            base, why = source.removeprefix('origin/'), f'{start} was created from {source}'
+        if not base:
+            base, why = default.removeprefix('origin/'), 'the default branch (the source of ' \
+                f'{start} is not known)'
+    else:
+        branch = plan_branch(meta)
+        base = (start or default).removeprefix('origin/')
+        why = f'the run started on {base}'
+    folder = repo
+    _, listing = run_quiet(['git', 'worktree', 'list', '--porcelain'], cwd=repo)
+    path = None
+    for line in (listing or '').splitlines():
+        if line.startswith('worktree '):
+            path = line[9:]
+        elif line == f'branch refs/heads/{branch}' and path:
+            folder = path
+    return branch, folder, base, why
+
 
 class ResumeBlocked(Exception):
     """Restarting this worktree run would lose its progress."""
@@ -1790,15 +2111,7 @@ class Supervisor:
 
     def run_branch(self):
         """The branch the runner uses for this plan (--branch, or the plan name sans date)."""
-        argv = self.meta['argv']
-        for i, arg in enumerate(argv):
-            if arg == '--branch' and i + 1 < len(argv):
-                return argv[i + 1]
-            if arg.startswith('--branch='):
-                return arg.split('=', 1)[1]
-        name = Path(self.meta['target']).name
-        name = name[:-3] if name.endswith('.md') else name
-        return re.sub(r'^[\d-]+', '', name).lstrip('-') or name
+        return plan_branch(self.meta)
 
     def launch(self):
         """(cwd, argv) for the next attempt.
@@ -2339,13 +2652,15 @@ class Supervisor:
         current = None
         task = None
         counts = {}  # title -> [done, total], in plan order
+        items = {}   # title -> [(ticked, text)]
         for line in path.read_text(encoding='utf-8', errors='replace').splitlines():
             hm = re.match(r'^###\s+(.*)', line)
             if hm:
                 task = hm.group(1).strip()
-            cm = re.match(r'^\s*- \[([ xX])\]', line)
+            cm = re.match(r'^\s*- \[([ xX])\]\s*(.*)', line)
             if cm:
                 total += 1
+                items.setdefault(task, []).append((cm.group(1) != ' ', cm.group(2).strip()))
                 c = counts.setdefault(task, [0, 0])
                 c[1] += 1
                 if cm.group(1) != ' ':
@@ -2354,6 +2669,7 @@ class Supervisor:
                 elif current is None:
                     current = task
         self.plan_tasks = [(t, d, n) for t, (d, n) in counts.items()]
+        self.plan_items = items
         return {'done': done, 'total': total, 'current_task': current}
 
     # -- milestones
@@ -2386,7 +2702,11 @@ class Supervisor:
             if key not in entry['models']:
                 entry['models'].append(key)
         m = re.search(r'(\d+)\s*$', step['section'])
-        self.event('task-start', task=index, tasks=count, title=title, model=model,
+        todo = [t for ticked, t in getattr(self, 'plan_items', {}).get(title, []) if not ticked]
+        about = steps_summary(todo)
+        if entry is not None and about and not entry.get('about'):
+            entry['about'] = about
+        self.event('task-start', task=index, tasks=count, title=title, model=model, about=about,
                    iteration=int(m.group(1)) if m else None, continued=continued,
                    steps_done=tasks.get('done'), steps_total=tasks.get('total'))
 
@@ -2447,6 +2767,29 @@ class Supervisor:
         while self.done_pending and (force or now() - self.done_pending[0]['at'] > 60):
             self.emit_done(self.done_pending.pop(0), None)
 
+    def commit_changes(self, commit):
+        """'3 files (+120 -8): a.go, b.go, c_test.go' for one commit, or None.
+
+        The plan file is left out: the runner commits its ticked boxes with the code.
+        """
+        code, out = self.git_here('show', '--numstat', '--format=', commit)
+        if code != 0:
+            return None
+        plan = self.plan_path.name if self.plan_path else None
+        files, added, removed = [], 0, 0
+        for line in out.splitlines():
+            parts = line.split('\t')
+            if len(parts) != 3 or (plan and Path(parts[2]).name == plan):
+                continue
+            files.append(parts[2])
+            added += int(parts[0]) if parts[0].isdigit() else 0
+            removed += int(parts[1]) if parts[1].isdigit() else 0
+        if not files:
+            return None
+        shown = ', '.join(Path(f).name for f in files[:4]) + (f', +{len(files) - 4} more'
+                                                             if len(files) > 4 else '')
+        return f"{len(files)} file{'s' if len(files) != 1 else ''} (+{added} -{removed}): {shown}"
+
     def emit_done(self, pending, commit):
         title = pending['title']
         index, count = self.task_position(title)
@@ -2457,10 +2800,15 @@ class Supervisor:
             entry['commit'] = f'{commit[0]} {commit[1]}'
         minutes = round((entry['done'] - entry['started']) / 60) if entry.get('started') else None
         entry['minutes'] = minutes
+        did = steps_summary([t for ticked, t in getattr(self, 'plan_items', {}).get(title, [])
+                             if ticked])
+        changes = self.commit_changes(commit[0]) if commit else None
+        entry['did'], entry['changes'] = did, changes
         tasks = self.state.get('tasks') or {}
         self.event('task-done', task=index, tasks=count, title=title, minutes=minutes,
                    models=entry['models'], iterations=entry['iterations'],
                    commit=commit[0] if commit else None, subject=commit[1] if commit else None,
+                   did=did, changes=changes,
                    steps_done=tasks.get('done'), steps_total=tasks.get('total'))
         self.safe_point(f'Task {index}/{count}' if index else title)
 
@@ -2903,7 +3251,7 @@ def cmd_watch_status(args):
     if root.exists():
         for d in sorted(root.iterdir(), reverse=True)[:40]:
             meta = read_json(d / 'session.json', {}) or {}
-            if not meta or (repo and meta.get('repo') != repo):
+            if not meta or (repo and not in_repo(meta, repo)):
                 continue
             w = watch_status(d)
             # live runs, and ended ones whose end the chat has not seen or reported
@@ -2926,7 +3274,7 @@ def runs_needing_attention(cwd):
     for d in sorted(root.iterdir(), reverse=True)[:40]:
         meta = read_json(d / 'session.json', {}) or {}
         # runs started before owners and watcher leases existed cannot tell who watches them
-        if meta.get('repo') != repo or 'owner' not in meta:
+        if not in_repo(meta, repo) or 'owner' not in meta:
             continue
         w = watch_status(d)
         if (w['alive'] and not w['watched']) or (
@@ -3025,6 +3373,24 @@ def fallback_values(e):
     return ', '.join(out) or f'{cli} defaults'
 
 
+def steps_summary(steps, limit=200):
+    """The plan's checklist items of one task as one short line, or None."""
+    out, used = [], 0
+    for text in steps:
+        text = re.sub(r'\s+', ' ', text.replace('`', '')).strip().rstrip('.;')
+        if not text:
+            continue
+        text = text if len(text) <= 90 else text[:87].rstrip() + '...'
+        if out and used + len(text) + 2 > limit:
+            break
+        out.append(text)
+        used += len(text) + 2
+    if not out:
+        return None
+    rest = len([t for t in steps if t.strip()]) - len(out)
+    return '; '.join(out) + (f' (+{rest} more)' if rest > 0 else '')
+
+
 def event_line(e):
     """The fixed one-line chat update for an event; None for events the chat skips."""
     k = e['kind']
@@ -3035,14 +3401,17 @@ def event_line(e):
     if k == 'task-start':
         how = f"continued (iteration {e['iteration']})" if e.get('continued') and e.get('iteration') \
             else 'continued' if e.get('continued') else 'started'
-        return ' · '.join(x for x in (f"▶ {task} {how}: {title}",
+        line = ' · '.join(x for x in (f"▶ {task} {how}: {title}",
                                       model_label(e.get('model')), steps) if x)
+        return line + (f"\n   Plan: {e['about']}" if e.get('about') else '')
     if k == 'task-done':
         took = f" in {e['minutes']} min" if e.get('minutes') is not None else ''
         commit = f"{e['commit']} {e['subject']}" if e.get('commit') else 'no commit yet'
         models = ', '.join(e.get('models') or []) or 'runner default model'
-        return ' · '.join(x for x in (f"✓ {task} done{took}: {title}",
+        line = ' · '.join(x for x in (f"✓ {task} done{took}: {title}",
                                       models, steps, commit) if x)
+        done = ' · '.join(x for x in (e.get('did'), e.get('changes')) if x)
+        return line + (f"\n   Done: {done}" if done else '')
     if k == 'phase-start':
         return f"▶ {e['phase'][:1].upper()}{e['phase'][1:]}: {e['section']} · {model_label(e.get('model'))}"
     if k == 'commit':
@@ -3478,6 +3847,318 @@ def default_branch(repo):
     return None
 
 
+GIT_OPERATIONS = {'rebase-merge': 'rebase', 'rebase-apply': 'rebase', 'MERGE_HEAD': 'merge',
+                  'CHERRY_PICK_HEAD': 'cherry-pick', 'REVERT_HEAD': 'revert', 'BISECT_LOG': 'bisect'}
+
+
+def porcelain_paths(repo):
+    """Changed and untracked paths as the runner counts them (git status -uall), unquoted."""
+    try:
+        out = subprocess.run(['git', 'status', '--porcelain', '-z', '--untracked-files=all'],
+                             cwd=repo, capture_output=True, text=True, encoding='utf-8',
+                             errors='replace', timeout=15, stdin=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    entries, paths = out.split('\0'), []
+    i = 0
+    while i < len(entries):
+        entry = entries[i]
+        i += 1
+        if len(entry) < 4:
+            continue
+        paths.append(entry[3:])
+        if entry[0] in 'RC':
+            i += 1  # -z puts a rename's source path in the next entry
+    return paths
+
+
+def implementation_place(repo, cfg=None, plan=None):
+    """Where the implementation run should work, and the recommended choice for this checkout.
+
+    The runner can make a worktree only from the default branch, and a run on a feature branch
+    works on that branch in place. So: on the default branch in the main checkout, recommend a
+    new worktree (the main checkout stays free for more planning); inside a linked worktree or on
+    a feature branch, recommend staying here. use_worktree = true has no per-run off switch, so it
+    blocks every run that must stay here.
+    """
+    cfg = cfg if cfg is not None else merged(cli_config_paths(repo)).get('', {})
+
+    def git(*argv):
+        code, out = run_quiet(['git', *argv], cwd=repo)
+        return out.strip() if code == 0 else None
+
+    git_dir = Path(git('rev-parse', '--absolute-git-dir') or '.')
+    common = git('rev-parse', '--path-format=absolute', '--git-common-dir')
+    linked = bool(common) and git_dir.resolve() != Path(common).resolve()
+    branch = git('branch', '--show-current') or ''
+    default = (cfg.get('default_branch') or default_branch(repo) or '').removeprefix('origin/')
+    on_default = branch == default if default else branch in ('main', 'master')
+    operation = next((name for marker, name in GIT_OPERATIONS.items()
+                      if (git_dir / marker).exists()), None)
+    plan_rel = None
+    if plan:
+        try:
+            plan_rel = Path(plan).resolve().relative_to(Path(repo).resolve()).as_posix()
+        except ValueError:
+            plan_rel = None
+    dirty = [path for path in porcelain_paths(repo) if path != plan_rel]
+    use_worktree = str(cfg.get('use_worktree', '')).lower() == 'true'
+    checkout = 'worktree' if linked else 'main checkout'
+    here_text = (f'this worktree, branch {branch}' if linked and not on_default
+                 else f'this checkout, branch {branch}' if not on_default
+                 else f'a new branch in this {"worktree" if linked else "checkout"}')
+    plan_meta = {'argv': ['ralphex'], 'target': str(plan or 'plan.md')}
+    new_path = str(sibling_path(repo, plan_branch(plan_meta))) if plan else \
+        str(sibling_path(repo, '<plan branch>'))
+    worktree = {'option': 'worktree', 'run_args': ['--new-worktree'], 'usable': True,
+                'reason': None, 'path': new_path,
+                'text': f'a new worktree in {new_path} from {default or branch}'}
+    here = {'option': 'here', 'run_args': [], 'usable': True, 'reason': None, 'text': here_text}
+    if not branch:
+        worktree.update(usable=False, reason='HEAD is detached')
+        here.update(usable=False, reason='HEAD is detached: check out a branch first')
+    elif not on_default:
+        worktree.update(usable=False,
+                        reason=f'the runner makes worktrees only from {default or "main/master"}; '
+                               f'this {checkout} is on {branch}')
+    if operation:
+        worktree.update(usable=False, reason=f'a {operation} is in progress: finish or abort it')
+        here.update(usable=False, reason=f'a {operation} is in progress: finish or abort it')
+    if on_default and dirty and here['usable']:
+        here.update(usable=False, reason='the runner refuses to branch with uncommitted files: '
+                                         + ', '.join(dirty[:5]))
+    if use_worktree:
+        # the runner would make its own worktree inside .ralphex/worktrees/, and fails on a branch
+        reason = ('use_worktree = true makes the runner make its own worktree inside '
+                  '.ralphex/worktrees/ (or fail on a feature branch): set use_worktree = false')
+        worktree.update(usable=False, reason=reason)
+        if not on_default and here['usable']:
+            here.update(usable=False, reason=reason)
+    if worktree['usable'] and (not linked or not here['usable']):
+        recommended = 'worktree'
+        why = ('planned on the default branch: the run gets its own worktree and branch in '
+               'workspaces/, and this checkout stays on ' + (default or branch)
+               + (' with your uncommitted files' if dirty else ''))
+    elif here['usable']:
+        recommended = 'here'
+        why = (f'already in a worktree on {branch}: work stays in it' if linked and not on_default
+               else f'already on the feature branch {branch}: work stays on it' if not on_default
+               else 'this is already a separate worktree: a new branch here keeps it isolated')
+    else:
+        recommended = None
+        why = here['reason'] or worktree['reason']
+    return {'checkout': checkout, 'branch': branch or None, 'default_branch': default or None,
+            'on_default': on_default, 'dirty': dirty, 'operation': operation,
+            'use_worktree': use_worktree, 'recommended': recommended, 'why': why,
+            'options': [o for o in (worktree, here) if o['option'] == recommended]
+            + [o for o in (worktree, here) if o['option'] != recommended]}
+
+
+REPO_CONFIGS = ('.ralphex/config', '.agrouter/config', '.autopilot/config')
+
+
+WORKTREE_PATH = '{parent}/workspaces/{repo}/{Name}'
+
+
+def sibling_path(repo, branch):
+    """Folder for a new worktree, in the workspaces layout: <parent>/workspaces/<repo>/<Name>.
+
+    <parent> is the folder that holds the main checkout (also when repo is a linked worktree),
+    <Name> is the branch with a capital first letter ("add-cache" -> "Add-cache"). The
+    [worktree] path key in the autopilot config changes the pattern; it knows {parent},
+    {repo}, {branch} and {Name}.
+    """
+    code, common = run_quiet(['git', 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+                             cwd=repo)
+    main = Path(common).parent if code == 0 and common and Path(common).name == '.git' \
+        else Path(repo)
+    safe = re.sub(r'[^A-Za-z0-9._-]+', '-', branch).strip('-') or 'run'
+    pattern = autopilot_config('worktree').get('path') or WORKTREE_PATH
+    path = pattern.format(parent=main.parent, repo=main.name, branch=safe,
+                          Name=safe[:1].upper() + safe[1:])
+    path = Path(path).expanduser()
+    return path if path.is_absolute() else main / path
+
+
+def worktree_of(repo, branch):
+    """Path of an existing worktree that has branch checked out, or None."""
+    _, listing = run_quiet(['git', 'worktree', 'list', '--porcelain'], cwd=repo)
+    path = None
+    for line in (listing or '').splitlines():
+        if line.startswith('worktree '):
+            path = line[9:]
+        elif line == f'branch refs/heads/{branch}' and path:
+            return path
+    return None
+
+
+def prepare_worktree(repo, plan, cli_args, path=None):
+    """Make (or reuse) the run's worktree in workspaces/, with the plan and repo configs in it.
+
+    The runner's own --worktree puts it in .ralphex/worktrees/ inside the checkout; autopilot
+    makes it in the workspaces layout instead (sibling_path) and runs the runner there on the new branch, which the
+    runner then uses in place. An uncommitted plan and uncommitted repository configs are
+    copied and committed on the new branch, so the run sees them; the source files stay.
+    """
+    repo = Path(repo)
+    branch = plan_branch({'argv': ['ralphex', *cli_args], 'target': str(plan)})
+    _, base = run_quiet(['git', 'branch', '--show-current'], cwd=repo)
+    rel = Path(plan).resolve().relative_to(repo.resolve())
+    existing = worktree_of(repo, branch)
+    if existing and Path(existing).resolve() != repo.resolve():
+        return {'path': existing, 'branch': branch, 'base': base, 'plan': str(Path(existing) / rel),
+                'reused': True, 'copied': []}
+    if existing:
+        die(f'{branch} is checked out in this folder: run here instead of in a new worktree')
+    target = Path(path) if path else sibling_path(repo, branch)
+    n = 2
+    while target.exists() and not path:
+        target = Path(f'{sibling_path(repo, branch)}-{n}')
+        n += 1
+    if target.exists():
+        die(f'{target} exists and is not a worktree of {branch}')
+    has_branch = run_quiet(['git', 'rev-parse', '--verify', '-q', f'refs/heads/{branch}'],
+                           cwd=repo)[0] == 0
+    argv = ['git', 'worktree', 'add', str(target), branch] if has_branch else \
+        ['git', 'worktree', 'add', '-b', branch, str(target), base]
+    code, out = run_quiet(argv, cwd=repo, timeout=120)
+    if code != 0:
+        die(f'git worktree add failed: {out[-300:]}')
+    dirty = set(porcelain_paths(repo))
+    copied = []
+    wanted = [rel.as_posix()] + ([] if has_branch else [
+        c for c in dirty if c in REPO_CONFIGS or c.startswith('.ralphex/scripts/')])
+    for name in wanted:
+        src, dst = repo / name, target / name
+        if src.is_file() and (name in dirty or not dst.exists()):
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            copied.append(name)
+    if copied:
+        run_quiet(['git', 'add', '--', *copied], cwd=target)
+        code, out = run_quiet(['git', 'commit', '-m', f'add plan: {branch}'], cwd=target, timeout=60)
+        if code != 0:
+            die(f'could not commit the plan in {target}: {out[-300:]}')
+    return {'path': str(target), 'branch': branch, 'base': base, 'plan': str(target / rel),
+            'reused': False, 'copied': copied}
+
+
+def cmd_place(args):
+    repo = git_root()
+    if not repo:
+        die('not inside a git repository')
+    emit(implementation_place(repo, plan=args.plan))
+
+
+def remote_host(url):
+    url = url or ''
+    if 'github' in url:
+        return 'github'
+    if 'gitlab' in url:
+        return 'gitlab'
+    return None
+
+
+def plan_title(plan):
+    try:
+        for line in Path(plan).read_text(encoding='utf-8').splitlines():
+            if line.startswith('# '):
+                return line[2:].strip()
+    except OSError:
+        pass
+    return None
+
+
+def cmd_publish(args):
+    """Push the run's branch and open (or reuse) a pull request against its base branch."""
+    sdir = session_dir(args.session)
+    meta = read_json(sdir / 'session.json', {}) or {}
+    st = read_json(sdir / 'state.json', {}) or {}
+    if meta.get('kind') != 'run':
+        die('publish takes a run session')
+    mode = args.mode or autopilot_config('publish').get('mode', 'pr')
+    draft_cfg = autopilot_config('publish').get('draft', 'false').lower() == 'true'
+    branch, folder, base, base_why = run_work(meta)
+    if args.base:
+        base, base_why = args.base, 'chosen with --base'
+    out = {'branch': branch, 'folder': folder, 'base': base, 'base_why': base_why,
+           'mode': mode, 'pushed': False, 'pr': None, 'skipped': None}
+
+    def finish(skipped=None, **extra):
+        out.update(extra, skipped=skipped)
+        text = (f"Opened pull request {out['pr']['url']} ({branch} into {base})"
+                if out['pr'] and out['pr'].get('created')
+                else f"Updated pull request {out['pr']['url']}" if out['pr']
+                else f'Pushed {branch} to {out.get("remote")}' if out['pushed']
+                else f'Did not publish {branch}')
+        log_decision(sdir, kind='decision', by='autopilot', text=text,
+                     reason=skipped or (f'[publish] mode = {mode}; base: {base_why}'))
+        emit(out)
+
+    def git(*argv, timeout=60):
+        return run_quiet(['git', *argv], cwd=folder, timeout=timeout)
+
+    if mode == 'off':
+        return finish('[publish] mode = off')
+    if run_quiet(['git', 'rev-parse', '--verify', '-q', f'refs/heads/{branch}'],
+                 cwd=meta['repo'])[0] != 0:
+        return finish(f'the run made no branch {branch}')
+    if branch == base:
+        return finish(f'the run worked on {base} itself: nothing to compare')
+    _, ahead = git('rev-list', '--count', f'{base}..{branch}')
+    out['commits'] = int(ahead) if (ahead or '').isdigit() else None
+    if not out['commits']:
+        return finish(f'{branch} has no commits ahead of {base}')
+    out['uncommitted'] = porcelain_paths(folder)
+    _, remotes = git('remote')
+    remotes = (remotes or '').split()
+    remote = 'origin' if 'origin' in remotes else (remotes[0] if remotes else None)
+    out['remote'] = remote
+    if not remote:
+        return finish('the repository has no git remote')
+    code, msg = git('push', '-u', remote, f'{branch}:{branch}', timeout=300)
+    if code != 0:
+        return finish('git push failed (never forced): ' + (msg or '').splitlines()[-1][:300])
+    out['pushed'] = True
+    if mode != 'pr':
+        return finish()
+    code, heads = git('ls-remote', '--heads', remote, base, timeout=60)
+    if code == 0 and not (heads or '').strip():
+        default = (default_branch(meta['repo']) or '').removeprefix('origin/')
+        base, base_why = default, f'{out["base"]} is not on {remote}: the default branch'
+        out.update(base=base, base_why=base_why)
+    _, url = git('config', '--get', f'remote.{remote}.url')
+    host = remote_host(url)
+    title = args.title or plan_title(st.get('plan_file') or meta['target']) or branch
+    draft = args.draft or draft_cfg or st.get('status') != 'done'
+    body = Path(args.body_file).read_text(encoding='utf-8') if args.body_file else \
+        f'Implements `{Path(meta["target"]).name}` (autopilot run {sdir.name}).\n'
+    if host == 'github' and shutil.which('gh'):
+        code, view = run_quiet(['gh', 'pr', 'view', branch, '--json', 'url,state,baseRefName'],
+                               cwd=folder, timeout=60)
+        try:
+            existing = json.loads(view) if code == 0 else None
+        except ValueError:
+            existing = None
+        if existing and existing.get('state') == 'OPEN':
+            return finish(pr={'url': existing['url'], 'created': False,
+                              'base': existing.get('baseRefName')})
+        argv = ['gh', 'pr', 'create', '--base', base, '--head', branch, '--title', title,
+                '--body', body] + (['--draft'] if draft else [])
+    elif host == 'gitlab' and shutil.which('glab'):
+        argv = ['glab', 'mr', 'create', '--source-branch', branch, '--target-branch', base,
+                '--title', title, '--description', body, '--yes'] + (['--draft'] if draft else [])
+    else:
+        tool = {'github': 'gh', 'gitlab': 'glab'}.get(host)
+        return finish(f'pushed only: install and log in to {tool} to open the pull request'
+                      if tool else f'pushed only: no pull request support for {url}')
+    code, msg = run_quiet(argv, cwd=folder, timeout=120)
+    link = re.findall(r'https?://\S+', msg or '')
+    if code != 0 or not link:
+        return finish('pull request not created: ' + ((msg or '').splitlines() or ['?'])[-1][:300])
+    return finish(pr={'url': link[-1], 'created': True, 'draft': draft, 'base': base})
+
+
 def cmd_report(args):
     """Everything that happened in a flow (or one session), for the final report."""
     root = state_root() / 'sessions'
@@ -3531,14 +4212,25 @@ def cmd_report(args):
                      'waited_min': d.get('waited_min'), 'recommended': d.get('recommended')}
                     for d in decisions if d.get('by', 'user') != 'user' and d.get('kind') != 'note']
     git = {}
+    runs = [read_json(d / 'session.json', {}) for d in dirs]
+    runs = [m for m in runs if m.get('kind') == 'run' and m.get('repo')]
     if repo:
-        base = default_branch(repo)
-        _, branch = run_quiet(['git', 'branch', '--show-current'], cwd=repo)
-        git = {'branch': branch, 'base': base}
+        if runs:
+            branch, folder, base, _ = run_work(runs[-1])
+        else:
+            base = default_branch(repo)
+            folder = repo
+            _, branch = run_quiet(['git', 'branch', '--show-current'], cwd=repo)
+        git = {'branch': branch, 'base': base, 'folder': folder}
+        published = [d for d in decisions if d.get('by') == 'autopilot'
+                     and re.match(r'(Opened|Updated) pull request|Pushed |Did not publish',
+                                  d.get('text') or '')]
+        if published:
+            git['published'] = published[-1]['text']
         if base and branch and branch != base.split('/')[-1]:
             _, commits = run_quiet(['git', 'log', '--oneline', '--no-decorate',
-                                    f'{base}..HEAD'], cwd=repo)
-            _, stat = run_quiet(['git', 'diff', '--stat', f'{base}...HEAD'], cwd=repo)
+                                    f'{base}..{branch}'], cwd=folder)
+            _, stat = run_quiet(['git', 'diff', '--stat', f'{base}...{branch}'], cwd=folder)
             git['commits'] = commits.splitlines()[:60]
             git['diffstat'] = stat.splitlines()[-25:]
     emit({'flow': flow, 'sessions': sessions, 'decisions': decisions, 'timeouts': timeouts,
@@ -3634,6 +4326,9 @@ def main(argv=None):
     s.add_argument('--max-restarts', type=int, default=5)
     s.add_argument('--force', action='store_true', help='run even when check-plan says redesign')
     s.add_argument('--flow', help='flow id shared by the sessions of one full run')
+    s.add_argument('--new-worktree', action='store_true',
+                   help='make a worktree in <parent>/workspaces/<repo>/<Name> and run there')
+    s.add_argument('--worktree-path', help='folder for the new worktree (implies --new-worktree)')
     s.set_defaults(fn=cmd_run)
     s = sub.add_parser('wait')
     s.add_argument('session')
@@ -3708,6 +4403,8 @@ def main(argv=None):
     s.add_argument('--executor', choices=['codex', 'claude'],
                    help='actual planning executor, including a per-session fallback')
     s.add_argument('--timeout', type=int, default=900)
+    s.add_argument('--options', action='store_true',
+                   help='print the review options and the recommended one; run nothing')
     s.set_defaults(fn=cmd_review_plan)
     s = sub.add_parser('extend')
     s.add_argument('session')
@@ -3740,6 +4437,19 @@ def main(argv=None):
     s.add_argument('--by', default='user')
     s.add_argument('--reason')
     s.set_defaults(fn=cmd_stop)
+    s = sub.add_parser('publish')
+    s.add_argument('session', help='the run session')
+    s.add_argument('--mode', choices=['pr', 'push', 'off'],
+                   help='default: [publish] mode in the autopilot config, else pr')
+    s.add_argument('--base', help='target branch (default: the branch the run started from)')
+    s.add_argument('--title')
+    s.add_argument('--body-file', help='pull request description (Markdown)')
+    s.add_argument('--draft', action='store_true',
+                   help='open as a draft (always when the run did not finish)')
+    s.set_defaults(fn=cmd_publish)
+    s = sub.add_parser('place')
+    s.add_argument('--plan', help='the plan file (an uncommitted plan does not count as dirty)')
+    s.set_defaults(fn=cmd_place)
     s = sub.add_parser('list')
     s.add_argument('--all', action='store_true')
     s.set_defaults(fn=cmd_list)
@@ -3759,7 +4469,10 @@ def main(argv=None):
     s.add_argument('--force', action='store_true')
     s.set_defaults(fn=cmd_install_wrapper)
     s = sub.add_parser('config-init')
-    s.add_argument('dest', nargs='?', default='.ralphex/config')
+    s.add_argument('dest', nargs='?', help='default: the tool\'s repository config path')
+    s.add_argument('--tool', choices=sorted(CONFIG_DEST), default='ralphex')
+    s.add_argument('--merge', action='store_true',
+                   help='upgrade a partial file: full template plus its current values (backup in the state dir)')
     s.add_argument('--force', action='store_true')
     s.set_defaults(fn=cmd_config_init)
     s = sub.add_parser('plan-rev')

@@ -31,12 +31,38 @@ available; otherwise read the diff of the main files and summarize them
 directly. Give the full walkthrough (`explain-summarize`) only when the
 user asks for it.
 
+## Pull Request Description
+
+`AP publish` takes it as `--body-file`. Write it before publishing, in the
+same Simplified Technical English, short:
+
+```
+## Goal
+<the task in one or two sentences> · Plan: `<plan path>`
+
+## What changed
+<the summarize bullets for the branch>
+
+## Tasks
+| Task | Status | Commit |
+
+## Decided without the user
+<one line per without_user entry, or "None">
+
+Made by an autopilot run (<session>), <executor> through <router or direct>.
+```
+
+Leave out the logs and the model table. A run that did not finish says
+which task stopped and why, at the top.
+
 ## Layout
 
 ```
 # Autopilot report: <task in a few words>
 
 **Result:** done | partly done | failed | stopped · <branch> · <N> commits · <duration>
+**Pull request:** <link> into <base> (draft when not done) | pushed only: <reason> | not published: <reason>
+**Worktree:** <path> (kept for review; after the merge: `git worktree remove <path>`), only for a run in a new worktree
 **Decided without you:** <N> decisions. Review them below.
 
 ## 1. Decided without you
@@ -57,8 +83,10 @@ plan file path.
 
 **What was done:** the `summarize` bullets for the branch changes, with
 links to the code. Then the plan tasks as a table:
-| Task | Status ✓/✗/– | Model | Minutes | Commit |
-Take the last three columns from each run session's `task_log`.
+| Task | Status ✓/✗/– | What was done | Model | Minutes | Commit |
+Take the last four columns from each run session's `task_log`: "What was
+done" is `did` and `changes` (shorten to one line), or `about` with "not
+finished" for a task that did not end.
 
 ## 3. Open items
 Only items that need the user: failed or skipped tasks, problems that

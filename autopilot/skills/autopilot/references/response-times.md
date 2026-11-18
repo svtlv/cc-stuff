@@ -14,7 +14,7 @@ and how costly a wrong default is.
 | `question` | Planner clarifying question | 10 min | — | recommended option |
 | `choice`, `yesno` | Other planner prompts | 10 min | — | recommended / safe answer |
 | `draft` | Plan draft review | 30 min | 10 min before | accept, or revise with the gaps found |
-| `decide` | Implement or stop, after the plan explanation | 60 min | 15 min before | implement |
+| `decide` | Implement or stop, after the plan explanation | 60 min | 15 min before | implement in the place `AP place` recommends |
 | `run_start` | Start a standalone run | 30 min | 10 min before | start |
 | `runtime` | Runner prompt during execution (the run is blocked) | 10 min | — | safe answer |
 | `limit` | Long rate limit: switch executor or wait | 30 min | — | recommended (waiting continues meanwhile) |
@@ -22,7 +22,7 @@ and how costly a wrong default is.
 | `preflight` | Worktree for a dirty tree, model-spec override, doc drift, active session, incomplete config | 10 min | — | recommended |
 | `plan_pick` | Which plan to run when several exist | never | — | waits |
 | `plan_review` | "Any changes?" after plan-only planning | 30 min | — | no changes |
-| `review_pick` | Review the finished plan: external, same agent, edit, or none | 10 min | — | the reviewer from `[review] plan` (`off`: no review) |
+| `review_pick` | Review the finished plan: external, same agent, edit, or none | 10 min | — | `recommended` from `review-plan --options`: external, else same agent (`off`: no review) |
 | `review_apply` | Which plan review findings to apply | 15 min | — | the findings the agent's assessment accepts |
 | `plan_check` | Redesign a plan the runner cannot use (or run one with warnings) | 15 min | — | redesign (or run as is, for minor warnings) |
 | `text` | Free-text prompt without a safe default | never | — | waits |
@@ -34,7 +34,8 @@ forbid.
 Overrides, later wins:
 
 ```ini
-# ~/.config/autopilot/config  (or the file in AUTOPILOT_CONFIG)
+# <repo>/.autopilot/config (committed, wins) or ~/.config/autopilot/config
+# (the user's file, or the file in AUTOPILOT_CONFIG)
 [timeouts]
 decide = 2h
 draft = 45m
@@ -76,8 +77,9 @@ Always state the recommendation and the time:
 
 ```
 Plan explained above. Implement it now?
-  1. Implement now (recommended: plan accepted, 6 tasks, tests included)
-  2. Implement in a worktree
+  1. Implement in a new worktree (recommended: plan accepted, 6 tasks, tests
+     included; planned on master, so the run gets its own worktree)
+  2. Implement here, on a new branch
   3. Revise the plan
   4. Stop here
 I'll start implementing at 16:40 (in 60 min) if you don't answer.
