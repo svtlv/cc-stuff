@@ -113,23 +113,30 @@ timeline. Do not paraphrase `activity`, add "still working" lines or
 re-post the task list. A sample run:
 
 ```
-▶ Task 1/13 started: Data model and schema migration · claude-opus-5-5 (xhigh) · steps 0/67
+▶ Task 1/13 started: Data model and schema migration · claude-opus-5-5 (xhigh) · chosen by agrouter · steps 0/67
    Plan: add DigestSetup model; add migration 0042; write model tests (+3 more)
 ✓ Task 1/13 done in 9 min: Data model and schema migration · claude-opus-5-5 (xhigh) · steps 6/67 · 3f2a1c9 Add digest setup model
    Done: add DigestSetup model; add migration 0042; write model tests (+3 more) · 4 files (+212 -3): models.py, 0042_digest.py, test_models.py, admin.py
-▶ Task 2/13 started: Seed migration for today's digest · claude-opus-5-5 (xhigh) · steps 6/67
+▶ Task 2/13 started: Seed migration for today's digest · claude-opus-5-5 (xhigh) · chosen by agrouter · steps 6/67
    Plan: seed today's digest from settings; test the seed (+1 more)
 ⚠ Attempt failed (transient): ERROR: claude execution: signal: killed. Restarting in 60 s (restart 1 of 5); finished tasks are kept.
 ⚠ Router fallback on Task 2/13: Seed migration for today's digest: Model routing timed out (classifier_timeout, classify stage). Not chosen by agrouter; runs on claude defaults: model claude-opus-5-5 (verified default), effort unknown (claude did not report it).
-▶ Task 2/13 continued (iteration 3): Seed migration for today's digest · claude-opus-5-5 (default effort) [router fallback] · steps 8/67
+▶ Task 2/13 continued (iteration 3): Seed migration for today's digest · claude-opus-5-5 (default effort) [router fallback] · claude default (router fallback) · steps 8/67
 ✓ Task 13/13 done in 4 min: Docs · claude-sonnet-5-5 (high) · steps 67/67 · 9d0e4b2 Update docs
-▶ Code review: claude review 1 · claude-opus-5-5 (high)
+▶ Code review: claude review 1 · claude-opus-5-5 (high) · model chosen by agrouter, effort set by review_model = :high in .ralphex/config
 • Commit 1b7c0de: fix: handle empty destinations
-▶ External review: codex iteration 1 · gpt-6.1-sol (high)
+… Code review: claude review 1 still running (30 min) · last output 12 min ago · agent active now
+▶ External review: codex iteration 1 · gpt-6.2-sol (high) · chosen by agrouter
+▶ External review: codex iteration 2 · gpt-6.2-sol (xhigh) · chosen by agrouter
 ✓ Run finished. Writing the final report.
 ```
-**Note:** every task gets a start line with the model the router picked
-and what it is going to do, and a done line with its time, models, commit
+**Note:** every task and every review step gets a start line with its
+model and effort and who chose them: "chosen by agrouter", "set by
+<key> = <spec> in <config file>" (or a run flag), or the CLI default. When
+the model and the effort have different sources, the line names both.
+The runner prints the Codex banner only on the first Codex call, so for
+later Codex steps autopilot reads the choice from agrouter's log. A task
+start line also says what the task is going to do, and a done line with its time, models, commit
 and what it did. The plan file is not counted in the changed files: the
 runner commits its ticked boxes with the code. When agrouter could not
 route a step, a fallback line comes first: why routing failed, and the CLI

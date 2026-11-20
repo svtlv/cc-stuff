@@ -14,7 +14,7 @@ the main one produced, so it catches what that model missed.
 
 | Field | Meaning |
 |---|---|
-| `codex.usable`, `codex.reason` | Installed, ≥ 0.130.0, logged in (`codex login status`), not disabled in the agrouter config |
+| `codex.usable`, `codex.reason` | Installed, ≥ 0.130.0, logged in (`codex login status`), not disabled in the agrouter config. The login check is skipped when `~/.codex/config.toml` sets a non-OpenAI `model_provider` (a company gateway has its own key), or with `AUTOPILOT_CODEX_LOGIN_OK=1` |
 | `claude.usable`, `claude.reason` | Installed, logged in (`claude auth status --json`), not disabled in the agrouter config |
 | `execution` | Configured executor, whether it is usable, its reason, possible Codex fallback and any configuration blocker |
 | `code_review` | `tool` (`codex`, `custom`, `none`), `usable`, `reason` |

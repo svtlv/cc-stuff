@@ -82,6 +82,9 @@ SELECTION_RE = re.compile(r'^agrouter: selection: (\{.*\})')
 ROUTER_WARNING_RE = re.compile(r'^agrouter: warning: (.+)')
 # no output this long while running (not waiting on a prompt or a limit) is worth a look
 STALL_S = int(os.environ.get('AUTOPILOT_STALL_S', 1200))
+# a step without a milestone this long gets a "still running" line, so a slow review
+# never looks like a stalled run
+HEARTBEAT_S = float(os.environ.get('AUTOPILOT_HEARTBEAT_S', 1800))
 PROGRESS_S = float(os.environ.get('AUTOPILOT_PROGRESS_S', 5))  # how often the plan is re-read
 # waking the owner chat: after this long unwatched with news, then again every WAKE_EVERY_S;
 # after the run ends the supervisor keeps trying for LINGER_S
@@ -118,6 +121,10 @@ REVIEW_ALL, REVIEW_NONE = 'All findings', 'None'
 PLAN_REVIEW_MIN = (1, 7, 0, 4)
 # "  2. MAJOR: Task 3 - text" under "plan review findings:" (the indent is gone after clean_line)
 REVIEW_FINDING_RE = re.compile(r'^(\d+)\.\s+(CRITICAL|MAJOR|MINOR):\s*(.*)$')
+# lines that end the findings list: a section, the questions, a menu, the answer prompt
+FINDINGS_END_RE = re.compile(r'^--- .+ ---$|' + re.escape(REVIEW_APPLY_Q) + '|'
+                             + re.escape(REVIEW_PICK_Q) + r'|^Enter your answer|^\d+\)\s|'
+                             r'^(plan review|plan revis|applying selected|SELECTED:)')
 # the review loop's outcome lines: posted to the chat as plan review updates
 REVIEW_LINE_RE = re.compile(
     r'^(plan review skipped|plan review found no issues|no findings selected, plan left unchanged|'
@@ -142,10 +149,23 @@ def now():
 
 
 def read_json(path, default=None):
-    try:
-        return json.loads(Path(path).read_text(encoding='utf-8'))
-    except (OSError, ValueError):
-        return default
+    """The JSON in path, or default when it is missing or unreadable.
+
+    A state file that exists but cannot be read is being replaced right now (on Windows the
+    swap briefly denies access; elsewhere a reader can meet a half-written copy from a
+    foreign tool): retry for a short time, so a reader never takes it for an empty state.
+    """
+    path = Path(path)
+    for attempt in range(25):
+        try:
+            return json.loads(path.read_text(encoding='utf-8'))
+        except FileNotFoundError:
+            return default
+        except (OSError, ValueError):
+            if attempt == 24 or not path.exists():
+                return default
+            time.sleep(0.02)
+    return default
 
 
 def write_json(path, data):
@@ -163,11 +183,16 @@ def write_json(path, data):
             time.sleep(0.02)
 
 
+# a detached supervisor has no console: without this flag every console program it starts
+# (git, tasklist, codex ...) opens a window of its own for a moment
+NO_WINDOW = {'creationflags': 0x08000000} if WINDOWS else {}  # CREATE_NO_WINDOW
+
+
 def run_quiet(argv, timeout=15, cwd=None):
     try:
         res = subprocess.run(**command_kwargs(argv), capture_output=True, text=True,
                              encoding='utf-8', errors='replace', timeout=timeout,
-                             cwd=cwd, stdin=subprocess.DEVNULL)
+                             cwd=cwd, stdin=subprocess.DEVNULL, **NO_WINDOW)
         return res.returncode, (res.stdout + res.stderr).strip()
     except (OSError, subprocess.SubprocessError) as exc:
         return None, str(exc)
@@ -275,10 +300,34 @@ def session_active(st):
     return pid_alive(st.get('pid')) and st.get('status') not in ('done', 'failed', 'stopped')
 
 
+def win_pid_alive(pid):
+    """True/False from the Windows API without starting a process; None when it cannot tell."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        handle = kernel32.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5  # access denied: it exists
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return None
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return None
+
+
 def pid_alive(pid):
     if not pid:
         return False
     if WINDOWS:
+        alive = win_pid_alive(pid)
+        if alive is not None:
+            return alive
         code, out = run_quiet(['tasklist', '/FI', f'PID eq {pid}', '/FO', 'CSV', '/NH'])
         return code == 0 and any(len(row) > 1 and row[1] == str(pid)
                                  for row in csv.reader(out.splitlines()))
@@ -649,11 +698,20 @@ def autopilot_template():
              '# releases on GitHub at their start and offer an upgrade (24h, 1h, 0 = every',
              '# start, off = never)',
              '# check = 24h',
+             '', '[compact]',
+             '# mode: at the end of planning, type /compact into the chat before the run',
+             '# starts, then wake it to start the run (type), or keep the context (off)',
+             '# mode = type',
              '', '[worktree]',
              '# path: where a new worktree for a run goes (the workspaces layout by default).',
              '#   {parent} the folder that holds this repository, {repo} its name,',
              '#   {branch} the run branch, {Name} the branch with a capital first letter',
              '# path = {parent}/workspaces/{repo}/{Name}',
+             '# branch: the run branch name. {slug} the plan file name without its date,',
+             '#   {ticket} a ticket id (ABC-123: given, or found in the current branch or the',
+             '#   plan), {summary} the plan title. path knows {slug}, {ticket}, {summary} too.',
+             '#   Example: branch = feature/{ticket}/{slug}, path = {parent}/wt/{ticket}-{summary}',
+             '# branch = {slug}',
              '', '[timeouts]',
              '# Response time per decision: 90s, 10m, 1h, 1h30m or never. After it the',
              '# recommended answer is taken and logged. <key>.remind sets a reminder before it.']
@@ -1335,6 +1393,23 @@ def cmd_set_docs(args):
     emit(result)
 
 
+def codex_custom_provider():
+    """The model_provider of ~/.codex/config.toml (CODEX_HOME) when it is not OpenAI, else None.
+
+    `codex login status` checks only the OpenAI login. A custom provider (for example a company
+    gateway) authenticates with its own key, so that check fails although codex works.
+    """
+    home = Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex')
+    try:
+        text = (home / 'config.toml').read_text(encoding='utf-8')
+    except OSError:
+        return None
+    top = re.split(r'(?m)^\s*\[', text, maxsplit=1)[0]  # keys before the first table
+    m = re.search(r'(?m)^\s*model_provider\s*=\s*["\']([^"\']+)["\']', top)
+    provider = m.group(1).strip() if m else None
+    return provider if provider and provider.lower() not in ('openai', 'chatgpt') else None
+
+
 def codex_status(router_cfg=None):
     """(usable, reason) for Codex as a reviewer: installed, new enough, logged in, routable."""
     path = shutil.which('codex')
@@ -1345,7 +1420,7 @@ def codex_status(router_cfg=None):
         return False, 'codex is older than 0.130.0'
     if (router_cfg or {}).get('cli.codex', {}).get('enabled') == 'false':
         return False, 'codex is disabled for routing in the agrouter config'
-    if os.environ.get('AUTOPILOT_CODEX_LOGIN_OK') != '1':
+    if os.environ.get('AUTOPILOT_CODEX_LOGIN_OK') != '1' and not codex_custom_provider():
         code, _ = run_quiet([path, 'login', 'status'], timeout=20)
         if code != 0:
             return False, 'codex is not logged in (run: codex login)'
@@ -1962,6 +2037,8 @@ def start_session(kind, target, cli_args, max_restarts, flow=None, extra=None):
             review_note = code_review['reason']
     argv += added + cli_args
     _, start_branch = run_quiet(['git', 'branch', '--show-current'], cwd=repo)
+    # the files that had changes before this flow: a move to a new worktree leaves them here
+    baseline = None if flow else dirty_snapshot(repo)
     write_json(sdir / 'session.json', {
         'start_branch': start_branch or None,
         'kind': kind, 'target': target, 'repo': repo, 'argv': argv, 'cli_args': list(cli_args),
@@ -1971,7 +2048,7 @@ def start_session(kind, target, cli_args, max_restarts, flow=None, extra=None):
         'policy': load_policy(),
         'created_iso': time.strftime('%Y-%m-%dT%H:%M:%S'),
         'repo_hash': hashlib.sha1(repo.encode()).hexdigest()[:8], 'plan_review': review_native,
-        **(extra or {})})
+        **({'baseline': baseline} if baseline is not None else {}), **(extra or {})})
     write_json(sdir / 'state.json', {'status': 'starting', 'seq': 0, 'events': [],
                                      **({'plan_file': target} if review_only else {})})
     if kind == 'plan' and review_native is False:
@@ -1992,6 +2069,26 @@ def start_session(kind, target, cli_args, max_restarts, flow=None, extra=None):
             log_decision(sdir, kind='decision', by='autopilot',
                          text='skipped the external code review for this run',
                          reason=review_note)
+    wt = (extra or {}).get('worktree') or {}
+    if wt.get('moved'):
+        names = ', '.join(wt['moved'][:8]) + (f" (+{len(wt['moved']) - 8} more)"
+                                              if len(wt['moved']) > 8 else '')
+        log_decision(sdir, kind='decision', by='autopilot',
+                     text=f"moved {len(wt['moved'])} file(s) changed during the flow to "
+                          f"{wt['path']}: {names}",
+                     reason='the run works in a new worktree; the source checkout got these '
+                            'files back as committed'
+                            + (f"; restore problems: {'; '.join(wt['restore_problems'])}"
+                               if wt.get('restore_problems') else ''))
+    if wt.get('ignored'):
+        log_decision(sdir, kind='decision', by='autopilot',
+                     text=f"copied without a commit (git ignores them): {', '.join(wt['ignored'][:8])}",
+                     reason='the run reads the plan from the worktree folder; it is not on the '
+                            'branch, and the runner cannot archive it to completed/ at the end')
+    if wt.get('kept_here'):
+        log_decision(sdir, kind='decision', by='autopilot',
+                     text=f"copied but kept in the source checkout: {', '.join(wt['kept_here'][:8])}",
+                     reason='these files had changes before the flow started; only a copy moved')
     log = open(sdir / 'supervisor.log', 'ab')
     proc = subprocess.Popen([sys.executable, str(SCRIPT), '_supervise', str(sdir)],
                             cwd=repo, stdin=subprocess.DEVNULL, stdout=log,
@@ -2032,6 +2129,8 @@ def cmd_run(args):
             '. Redesign it with the autopilot-plan skill (--redesign), or pass --force')
     repo = git_root() or '.'
     cli_args = list(args.cli_args)
+    if getattr(args, 'branch', None) and not any(a == '--branch' or a.startswith('--branch=') for a in cli_args):
+        cli_args += ['--branch', args.branch]  # the runner's flag: the run branch's name
     new_worktree = args.new_worktree or bool(args.worktree_path)
     if '--worktree' in cli_args:
         # the runner's own worktree lands inside .ralphex/worktrees/; make it beside the folder
@@ -2046,7 +2145,7 @@ def cmd_run(args):
                else 'Fix it first') + '; see the place command')
     extra = None
     if new_worktree:
-        wt = prepare_worktree(repo, plan, cli_args, args.worktree_path)
+        wt = prepare_worktree(repo, plan, cli_args, args.worktree_path, flow_baseline(args.flow))
         os.chdir(wt['path'])
         plan = Path(wt['plan']).resolve().relative_to(Path(wt['path']).resolve())
         extra = {'source_repo': repo, 'worktree': wt}
@@ -2146,6 +2245,12 @@ class Supervisor:
         self.stalled = False
         self.findings = None    # plan review findings being read, None outside that block
         self.state.setdefault('task_log', {})
+        self.router_mark = None  # (agrouter.log path, size) when a codex step started
+        try:
+            self.setup = model_setup(self.meta['repo'], self.meta.get('cli_args'),
+                                     self.meta.get('executor'))
+        except Exception:  # never let the model-source label stop a run
+            self.setup = None
 
     # -- state
     def save(self):
@@ -2156,6 +2261,8 @@ class Supervisor:
     def event(self, kind, **data):
         if kind in ('done', 'failed', 'stopped'):
             self.state['ended'] = now()
+        if kind not in WAIT_QUIET:
+            self.last_news = now()
         with self.state_lock:
             self.state['seq'] += 1
             ev = {'seq': self.state['seq'], 't': time.strftime('%H:%M:%S'),
@@ -2306,6 +2413,7 @@ class Supervisor:
             if self.step and self.step['phase'] != 'implementing tasks':
                 self.safe_point(self.step['section'])  # a review round ended
             self.step = {'section': label, 'phase': phase, 'at': now(), 'model': None}
+            self.router_mark = self.router_log_mark() if self.codex_step(label) else None
             if phase == 'external review' and self.state.get('skip_external'):
                 self.break_external_review()
             return
@@ -2337,7 +2445,9 @@ class Supervisor:
         """The runner's plan review: collect its numbered findings, report its outcome lines.
 
         The findings come between "plan review findings:" and the findings question, one
-        "N. SEVERITY: text" line each; a long finding wraps onto indented lines.
+        "N. SEVERITY: text" line each. The runner wraps a long finding at the terminal width
+        without an indent, and a finding can hold line breaks of its own: every other text line
+        belongs to the finding above it, until a section, an outcome line or the question.
         """
         if line == 'plan review findings:':
             self.findings = []
@@ -2349,7 +2459,8 @@ class Supervisor:
                 self.findings.append({'n': int(m.group(1)), 'severity': m.group(2),
                                       'text': m.group(3).strip()})
                 return True
-            if self.findings and line and raw[:1].isspace():
+            if self.findings and line and not FINDINGS_END_RE.search(line) \
+                    and not REVIEW_LINE_RE.match(line):
                 self.findings[-1]['text'] += ' ' + line
                 return True
             self.findings = None
@@ -2410,8 +2521,57 @@ class Supervisor:
             return True
         return False
 
+    def codex_step(self, section):
+        return (section or '').startswith('codex') or self.meta.get('executor') == 'codex'
+
+    def router_log(self):
+        """agrouter's console log for this repo (<log_dir>/agrouter.log), or None."""
+        repo = Path(self.meta['repo'])
+        log_dir = merged(router_config_paths(repo)).get('agrouter', {}).get('log_dir')
+        if not log_dir:
+            return None
+        path = Path(log_dir).expanduser()
+        return (path if path.is_absolute() else repo / path) / 'agrouter.log'
+
+    def router_log_mark(self):
+        path = self.router_log()
+        try:
+            return (path, path.stat().st_size) if path else None
+        except OSError:
+            return (path, 0)
+
+    def selection_from_log(self):
+        """The last codex selection agrouter logged since this step started, or None.
+
+        The runner shows the Codex banner (model, effort) only on its first Codex call and
+        hides agrouter's stderr for Codex, so later Codex steps report nothing. agrouter still
+        appends every selection to its console log.
+        """
+        if not self.router_mark:
+            return None
+        path, start = self.router_mark
+        try:
+            with open(path, 'rb') as fh:
+                fh.seek(start)
+                text = fh.read(256 * 1024).decode('utf-8', 'replace')
+        except OSError:
+            return None
+        found = None
+        for line in text.splitlines():
+            m = re.search(r'agrouter: selection: (\{.*\})\s*$', line)
+            if m:
+                try:
+                    sel = json.loads(m.group(1))
+                except ValueError:
+                    continue
+                if sel.get('cli') in (None, 'codex'):
+                    found = sel
+        return found
+
     def use_selection(self, sel):
         model = {k: sel.get(k) for k in ('cli', 'model', 'effort')}
+        if self.step:
+            self.step['selected'] = True  # an agrouter selection line: the router ran this step
         # a value agrouter left to the CLI: record what the CLI really runs with, and why
         effective = sel.get('effective') or {}
         defaults = {}
@@ -2842,10 +3002,25 @@ class Supervisor:
         step = self.step
         if not step or step.get('announced') or not (step['model'] or timed_out):
             return
+        if not step['model'] and self.router_mark:
+            sel = self.selection_from_log()
+            if sel:
+                self.router_mark = None
+                step['model_via'] = 'agrouter log'
+                self.use_selection(sel)  # fills the step's model and announces it
+                return
         step['announced'] = True
         model = step['model']
+        how = model_how(model, self.setup, step['phase'], step['section'], step.get('selected'))
+        via = step.get('model_via')
+        steps = self.state.setdefault('steps', [])
+        steps.append({'t': time.strftime('%H:%M:%S'), 'section': step['section'],
+                      'phase': step['phase'], 'model': model_label(model, how), 'how': how,
+                      **({'via': via} if via else {})})
+        self.state['steps'] = steps[-300:]
         if step['phase'] != 'implementing tasks':
-            self.event('phase-start', section=step['section'], phase=step['phase'], model=model)
+            self.event('phase-start', section=step['section'], phase=step['phase'], model=model,
+                       how=how, **({'via': via} if via else {}))
             return
         tasks = self.plan_progress() or {}
         self.state['tasks'] = tasks
@@ -2866,9 +3041,57 @@ class Supervisor:
         about = steps_summary(todo)
         if entry is not None and about and not entry.get('about'):
             entry['about'] = about
-        self.event('task-start', task=index, tasks=count, title=title, model=model, about=about,
+        self.event('task-start', task=index, tasks=count, title=title, model=model, how=how,
+                   about=about,
                    iteration=int(m.group(1)) if m else None, continued=continued,
                    steps_done=tasks.get('done'), steps_total=tasks.get('total'))
+
+    def agent_activity_age(self):
+        """Seconds since the agent CLI last wrote its transcript for this run, or None.
+
+        Claude Code writes ~/.claude/projects/<cwd with non-alphanumerics as ->/<id>.jsonl on
+        every message and tool call; Codex writes today's rollout files under
+        ~/.codex/sessions/. Only files written after the current step started count.
+        """
+        if not self.step:
+            return None
+        t = now()
+        if t - getattr(self, 'activity_checked', 0) < 30:
+            return getattr(self, 'activity_age', None)
+        self.activity_checked = t
+        cwd = self.state.get('resumed_in') or self.meta['repo']
+        dirs = [Path(os.environ.get('CLAUDE_CONFIG_DIR') or Path.home() / '.claude') / 'projects'
+                / re.sub(r'[^A-Za-z0-9]', '-', str(Path(cwd).resolve())),
+                Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex') / 'sessions'
+                / time.strftime('%Y/%m/%d')]
+        newest = None
+        for folder in dirs:
+            try:
+                for f in folder.glob('*.jsonl'):
+                    m = f.stat().st_mtime
+                    if m >= self.step['at'] - 5 and (newest is None or m > newest):
+                        newest = m
+            except OSError:
+                continue
+        self.activity_age = None if newest is None else max(0.0, t - newest)
+        return self.activity_age
+
+    def heartbeat(self, active):
+        """One "still running" event when a step had no news for HEARTBEAT_S."""
+        step = self.step
+        if not step or not step.get('announced') or self.state.get('waiting') \
+                or self.state.get('limit') or self.state.get('status') != 'running':
+            return
+        t = now()
+        if t - max(step['at'], getattr(self, 'last_news', 0)) < HEARTBEAT_S:
+            return
+        title = (self.state.get('tasks') or {}).get('current_task') \
+            if step['phase'] == 'implementing tasks' else None
+        index, count = self.task_position(title)
+        self.event('heartbeat', section=step['section'], phase=step['phase'], title=title,
+                   task=index, tasks=count, minutes=round((t - step['at']) / 60),
+                   output_min=round((t - self.last_output) / 60),
+                   active_min=None if active is None else round(active / 60))
 
     def git_here(self, *argv):
         where = self.plan_path.parent if self.plan_path else Path(self.meta['repo'])
@@ -2910,7 +3133,12 @@ class Supervisor:
         step = self.step
         if step and not step.get('announced') and now() - step['at'] > 20:
             self.announce_step(timed_out=True)
+        # the runner prints little in a review: the agent's own transcript shows it works
+        active = self.agent_activity_age()
         idle = now() - self.last_output
+        if active is not None:
+            idle = min(idle, active)
+        self.heartbeat(active)
         if idle < 60:
             self.stalled = False
         elif not self.stalled and idle > STALL_S and not self.state.get('waiting') \
@@ -3386,6 +3614,15 @@ def events_since(sdir, st, since):
     return out or [e for e in recent if e['seq'] > since]
 
 
+WATCH_GAP_S = float(os.environ.get('AUTOPILOT_WATCH_GAP_S', 180))  # a chat restarts its watch
+
+
+def short_text(text, limit=80):
+    """The first line of a long text (a task description can be kilobytes), cut to limit."""
+    first = (str(text or '').strip().splitlines() or [''])[0].strip()
+    return first if len(first) <= limit else first[:limit - 3].rstrip() + '...'
+
+
 def watch_status(sdir):
     """Who watches a run, and how much the chat has not seen yet."""
     meta = read_json(sdir / 'session.json', {}) or {}
@@ -3399,7 +3636,9 @@ def watch_status(sdir):
             'flow': meta.get('flow'), 'status': st.get('status') if alive or st.get('status') in
             ('done', 'failed', 'stopped') else 'lost',
             'alive': alive, 'owner': meta.get('owner'),
-            'watched': bool(watcher) and pid_alive(watcher.get('pid')),
+            'watched': bool(watcher.get('pid')) and pid_alive(watcher.get('pid')),
+            'between_watches': not watcher.get('pid') and now() - (watcher.get('ended') or 0)
+            < WATCH_GAP_S,
             'seen': seen, 'seq': st.get('seq', 0), 'unseen_updates': len(unseen),
             'waiting': bool(st.get('waiting')), 'tasks': tasks,
             'reported': bool((read_json(sdir / 'reported.json', {}) or {}).get('t'))}
@@ -3456,8 +3695,164 @@ def describe_run(w, chat):
         else 'Another chat started it'
     state = (f"is {w['status']}{where}; no chat is watching it" if w['alive']
              else f"ended ({w['status']}) and its end was not reported yet")
-    return (f"autopilot {w['kind']} session {w['session']} ({w['target']}) {state}; "
+    return (f"autopilot {w['kind']} session {w['session']} ({short_text(w['target'])}) {state}; "
             f"{w['unseen_updates']} update(s) not posted yet. {who}.")
+
+
+# ---------------------------------------------------------------- compaction before the run
+
+COMPACT_IDLE_S = float(os.environ.get('AUTOPILOT_COMPACT_IDLE_S', 900))   # wait for the turn end
+COMPACT_DONE_S = float(os.environ.get('AUTOPILOT_COMPACT_DONE_S', 600))   # wait for the compaction
+COMPACT_NO_HOOK_S = float(os.environ.get('AUTOPILOT_COMPACT_NO_HOOK_S', 180))  # host without a hook
+COMPACT_POLL_S = float(os.environ.get('AUTOPILOT_COMPACT_POLL_S', 1))
+
+
+def compact_dir():
+    return state_root() / 'compact'
+
+
+def compact_mode():
+    """type (type /compact into the chat's tab) or off."""
+    mode = (os.environ.get('AUTOPILOT_COMPACT') or autopilot_config('compact').get('mode')
+            or 'type').lower()
+    return mode if mode in ('type', 'off') else 'type'
+
+
+def compact_requests(chat, status):
+    """Open compaction requests of this chat in the given status."""
+    root = compact_dir()
+    if not chat or not root.exists():
+        return []
+    out = []
+    for path in sorted(root.glob('*.json')):
+        req = read_json(path, {}) or {}
+        if req.get('owner') == chat and req.get('status') == status:
+            out.append((path, req))
+    return out
+
+
+def resume_line(req):
+    return (f"autopilot: context compacted. Continue flow {req['flow']} at Step 5 (Run): read "
+            f"{req['handoff']} and start the run as it says")
+
+
+def cmd_compact(args):
+    """Compact the chat's context at the end of planning, then wake it to start the run.
+
+    No agent host lets the agent compact its own context. The chat writes a handoff file,
+    calls this and ends its turn. A detached helper waits for the Stop hook (the turn ended),
+    types `/compact <focus>` into the chat's terminal tab, waits for the SessionStart
+    (compact) hook, and types the resume line. The SessionStart hook also puts the handoff
+    pointer into the new context.
+    """
+    handoff = Path(args.handoff).expanduser().resolve()
+    if not handoff.is_file():
+        die(f'handoff file not found: {handoff}')
+    tab = own_tab()
+    owner = host_session_id()
+    skipped = ('compaction is off ([compact] mode = off)' if compact_mode() == 'off'
+               else 'this terminal cannot be typed into (no supported terminal and no '
+                    '[wake] command)' if not tab
+               else 'the chat session id is unknown, so the turn end cannot be seen' if not owner
+               else None)
+    if skipped:
+        emit({'ok': False, 'skipped': skipped})
+        return
+    focus = args.focus or (f'Keep only what the autopilot run needs: flow {args.flow}, the plan '
+                           f'file, the decision to implement and where, open wishes of the '
+                           f'user. The handoff file {handoff} holds the details.')
+    compact_dir().mkdir(parents=True, exist_ok=True)
+    path = compact_dir() / f"{args.flow}-{time.strftime('%H%M%S')}.json"
+    req = {'flow': args.flow, 'owner': owner, 'tab': tab, 'handoff': str(handoff),
+           'focus': one_line(focus), 'created': now(), 'status': 'waiting-idle'}
+    write_json(path, req)
+    with open(compact_dir() / 'helper.log', 'ab') as log:  # the helper keeps its own copy
+        subprocess.Popen([sys.executable, str(SCRIPT), '_compact', str(path)], cwd=os.getcwd(),
+                         stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                         **detach_kwargs())
+    emit({'ok': True, 'request': str(path), 'how': f"typed into the {tab['kind']} tab",
+          'resume_line': resume_line(req)})
+
+
+def cmd_compact_helper(args):
+    """_compact REQUEST: wait for the turn end, type /compact, wait, type the resume line."""
+    path = Path(args.request)
+
+    def update(**fields):
+        req = read_json(path, {}) or {}
+        req.update(fields)
+        write_json(path, req)
+        return req
+
+    def wait_for(key, limit):
+        end = now() + limit
+        while now() < end:
+            req = read_json(path, {}) or {}
+            if req.get(key) or req.get('status') == 'cancelled':
+                return req
+            time.sleep(COMPACT_POLL_S)
+        return read_json(path, {}) or {}
+
+    def type_line(req, text):
+        code, out = run_quiet(wake_argv(req['tab'], text), timeout=20)
+        return code == 0, out
+
+    req = wait_for('idle_at', COMPACT_IDLE_S)
+    if req.get('status') == 'cancelled':
+        return
+    if not req.get('idle_at'):
+        # the turn never ended in time: typing /compact into a busy chat is not safe;
+        # the resume line is (a busy chat queues it as a message)
+        ok, out = type_line(req, resume_line(req))
+        update(status='resumed-without-compact', resumed_at=now(),
+               error=None if ok else out[-200:])
+        return
+    time.sleep(2)  # the host finishes the turn after its Stop hook
+    update(status='compacting', typed_at=now())  # before typing: the hook can come fast
+    ok, out = type_line(req, f"/compact {req['focus']}")
+    if not ok:
+        # /compact did not reach the chat: still wake it, so the run starts
+        ok, out2 = type_line(req, resume_line(req))
+        if not ok:
+            notify('autopilot', 'Could not wake the chat. Open it and say "continue".')
+        update(status='resumed-without-compact' if ok else 'failed', resumed_at=now(),
+               error=(out if ok else out2)[-200:])
+        return
+    req = wait_for('compacted_at', COMPACT_DONE_S)
+    if not req.get('compacted_at'):
+        # a host without a SessionStart (compact) hook: give the compaction a fixed time
+        time.sleep(max(0.0, COMPACT_NO_HOOK_S - (now() - req.get('typed_at', now()))))
+    time.sleep(3)  # the host shows its prompt again after the compaction
+    ok, out = type_line(req, resume_line(req))
+    update(status='done' if ok else 'failed', resumed_at=now(),
+           compacted=bool(req.get('compacted_at')), error=None if ok else out[-200:])
+
+
+def compact_hook(event, data):
+    """The Stop and SessionStart (compact) parts of the compaction; True when they handled it."""
+    chat = data.get('session_id')
+    if event == 'stop':
+        pending = compact_requests(chat, 'waiting-idle')
+        for path, req in pending:
+            req['idle_at'] = now()
+            write_json(path, req)
+        return bool(pending)  # the turn must end now: never block it
+    if event == 'session-start' and data.get('source') == 'compact':
+        done = compact_requests(chat, 'compacting')
+        for path, req in done:
+            req['compacted_at'] = now()
+            write_json(path, req)
+        if done:
+            req = done[-1][1]
+            print(json.dumps({'hookSpecificOutput': {
+                'hookEventName': 'SessionStart',
+                'additionalContext': f"Autopilot compacted this chat before the run of flow "
+                                     f"{req['flow']}. The handoff file {req['handoff']} holds the "
+                                     'plan, the decision and the run arguments. A resume line '
+                                     'follows: then read it and continue the autopilot skill at '
+                                     'Step 5.'}}))
+        return bool(done)
+    return False
 
 
 def cmd_hook(args):
@@ -3469,6 +3864,11 @@ def cmd_hook(args):
         data = json.loads(sys.stdin.read() or '{}')
     except ValueError:
         data = {}
+    try:
+        if compact_hook(args.event, data):
+            return
+    except Exception:
+        pass
     chat = data.get('session_id')
     runs = runs_needing_attention(data.get('cwd') or os.getcwd())
     if not runs:
@@ -3493,6 +3893,10 @@ def cmd_hook(args):
                           'reason': describe_run(w, chat) + f' Before ending the turn, {todo} '
                           '(autopilot-run skill, "Staying in Charge").'}))
         return
+    # a live run between two watches of its chat is watched: say nothing about it
+    runs = [w for w in runs if not (w['alive'] and w.get('between_watches'))]
+    if not runs:
+        return
     lines = [describe_run(w, chat) for w in runs]
     lines.append(f'To take charge here, follow "Staying in Charge" in the autopilot-run skill: '
                  f'`{ap} next <session> --catch-up` posts what was missed. Answer the user first; '
@@ -3507,10 +3911,111 @@ def cmd_mark_reported(args):
     emit({'ok': True})
 
 
-def model_label(model):
+SPEC_FLAGS = {'plan_model': '--plan-model', 'task_model': '--task-model',
+              'review_model': '--review-model'}
+
+
+def model_setup(repo, cli_args=(), executor='claude'):
+    """How the runner picks models in repo: each phase spec with where it is set, and routing.
+
+    {'specs': {key: {'value', 'where'}}, 'routed': {'claude': bool, 'codex': bool},
+     'executor': ...}. A run flag (--task-model=...) beats the repo config, which beats
+    the global one.
+    """
+    paths = cli_config_paths(repo)
+    names = [str(paths[0]).replace(str(Path.home()), '~'), '.ralphex/config']
+    specs = {}
+    for path, name in zip(paths, names):
+        for key, value in merged([path]).get('', {}).items():
+            if key in SPEC_FLAGS or key in ('codex_model', 'codex_reasoning_effort'):
+                specs[key] = {'value': value, 'where': f'{key} = {value} in {name}'}
+    args = list(cli_args or [])
+    for key, flag in SPEC_FLAGS.items():
+        for i, arg in enumerate(args):
+            value = arg.split('=', 1)[1] if arg.startswith(flag + '=') else \
+                args[i + 1] if arg == flag and i + 1 < len(args) else None
+            if value is not None:
+                specs[key] = {'value': value, 'where': f'{flag}={value} on the run'}
+    eff = merged(paths).get('', {})
+    wrapper = parse_wrapper(repo, eff.get('codex_command'))
+    return {'specs': specs, 'executor': executor or 'claude',
+            'routed': {'claude': ROUTER in eff.get('claude_command', ''),
+                       'codex': bool(wrapper and wrapper['routes'])}}
+
+
+def step_pins(setup, phase, section):
+    """{'model': where or None, 'effort': where or None}: the config that fixes each field.
+
+    Follows the runner: tasks use task_model; reviews and finalize review_model, else
+    task_model; planning plan_model, else task_model; the external codex review (claude
+    mode) codex_model and codex_reasoning_effort. Under the codex executor an unset half of a
+    spec inherits codex_model / codex_reasoning_effort.
+    """
+    specs = setup['specs']
+
+    def spec(*keys):
+        return next((specs[k] for k in keys if (specs.get(k) or {}).get('value')), None)
+
+    def default(key):
+        s = specs.get(key) or {}
+        return s['where'] if s.get('value') else None
+
+    external = setup['executor'] != 'codex' and (section or '').startswith('codex')
+    if external:
+        return {'model': default('codex_model'), 'effort': default('codex_reasoning_effort')}
+    key = {'implementing tasks': ('task_model',),
+           'planning': ('plan_model', 'task_model'),
+           'plan review': ('plan_model', 'task_model')}.get(phase, ('review_model', 'task_model'))
+    s = spec(*key)
+    model, _, effort = (s['value'] if s else '').partition(':')
+    pins = {'model': s['where'] if s and model else None,
+            'effort': s['where'] if s and effort else None}
+    if setup['executor'] == 'codex':
+        pins['model'] = pins['model'] or default('codex_model')
+        pins['effort'] = pins['effort'] or default('codex_reasoning_effort')
+    return pins
+
+
+def model_how(model, setup, phase, section, selected=False):
+    """Who chose the step's model and effort: 'chosen by agrouter', 'set by <config>', ...
+
+    Per field: a config spec that fixes it wins (agrouter only passes it on); else agrouter
+    when the CLI runs through it; else the CLI's own default. A router fallback is the CLI
+    default. Fields with the same source are said once.
+    """
+    if not setup:
+        return None
+    model = model or {}
+    cli = model.get('cli') or ('codex' if (section or '').startswith('codex')
+                               or setup['executor'] == 'codex' else 'claude')
+    pins = step_pins(setup, phase, section)
+    routed = setup['routed'].get(cli) or selected
+    fallback = set((model.get('fallback') or {}).get('fields') or [])
+    left = set((model.get('defaults') or {}))
+    how = {}
+    for field in ('model', 'effort'):
+        if pins[field]:
+            how[field] = f'set by {pins[field]}'
+        elif field in fallback:
+            how[field] = f'{cli} default (router fallback)'
+        elif field in left:
+            how[field] = f'{cli} default (agrouter left it to {cli})'
+        elif routed and model.get(field):
+            how[field] = 'chosen by agrouter'
+        elif routed:
+            how[field] = 'not reported'
+        else:
+            how[field] = f'{cli} default (not routed)'
+    if how['model'] == how['effort']:
+        return how['model']
+    return f"model {how['model']}, effort {how['effort']}"
+
+
+def model_label(model, how=None):
     """'claude-opus-5-5 (xhigh)'; marks CLI defaults and router fallbacks."""
     if not model or not (model.get('model') or model.get('cli')):
-        return 'runner default model'
+        return 'model and effort not reported by the runner' if how == 'not reported' \
+            else 'runner default model'
     left = (model.get('fallback') or {}).get('defaults') or model.get('defaults') or {}
     name = model.get('model') or f"{model.get('cli')} default model"
     if model.get('effort'):
@@ -3567,7 +4072,8 @@ def event_line(e):
         how = f"continued (iteration {e['iteration']})" if e.get('continued') and e.get('iteration') \
             else 'continued' if e.get('continued') else 'started'
         line = ' · '.join(x for x in (f"▶ {task} {how}: {title}",
-                                      model_label(e.get('model')), steps) if x)
+                                      model_label(e.get('model'), e.get('how')),
+                                      e.get('how'), steps) if x)
         return line + (f"\n   Plan: {e['about']}" if e.get('about') else '')
     if k == 'task-done':
         took = f" in {e['minutes']} min" if e.get('minutes') is not None else ''
@@ -3578,7 +4084,9 @@ def event_line(e):
         done = ' · '.join(x for x in (e.get('did'), e.get('changes')) if x)
         return line + (f"\n   Done: {done}" if done else '')
     if k == 'phase-start':
-        return f"▶ {e['phase'][:1].upper()}{e['phase'][1:]}: {e['section']} · {model_label(e.get('model'))}"
+        return ' · '.join(x for x in (
+            f"▶ {e['phase'][:1].upper()}{e['phase'][1:]}: {e['section']}",
+            model_label(e.get('model'), e.get('how')), e.get('how')) if x)
     if k == 'commit':
         return f"• Commit {e['commit']}: {e['subject']}"
     if k == 'router-fallback':
@@ -3627,6 +4135,13 @@ def event_line(e):
         return f"{'⚠' if e.get('warning') else '•'} Plan review: {text[:1].upper()}{text[1:]}."
     if k == 'error':
         return f"⚠ {e.get('line')}"
+    if k == 'heartbeat':
+        where = f"{task}: {title}" if e.get('title') else \
+            f"{(e.get('phase') or 'step')[:1].upper()}{(e.get('phase') or 'step')[1:]}: {e.get('section')}"
+        active = '' if e.get('active_min') is None else \
+            (' · agent active now' if e['active_min'] < 1 else f" · agent active {e['active_min']} min ago")
+        return (f"… {where} still running ({e.get('minutes')} min) · last output "
+                f"{e.get('output_min')} min ago{active}")
     if k == 'wake':
         return None  # for the chat that was asleep: the catch-up shows what happened
     return None
@@ -3695,7 +4210,9 @@ def watch(sdir, since, prompt_after, timeout, any_event=False):
             return None
         time.sleep(1)
     if (read_json(sdir / 'watcher.json', {}) or {}).get('pid') == os.getpid():
-        (sdir / 'watcher.json').unlink(missing_ok=True)
+        # keep when the watch ended: the chat starts the next one in a moment, and the hooks
+        # must not call that normal gap "no chat is watching"
+        write_json(sdir / 'watcher.json', {'pid': None, 'owner': me['owner'], 'ended': now()})
     out = report(sdir, st, since)
     if since <= out['seq']:  # it reported everything between since and seq
         write_json(sdir / 'seen.json', {'seq': out['seq'], 't': now()})
@@ -4040,7 +4557,8 @@ def porcelain_paths(repo):
     try:
         out = subprocess.run(['git', 'status', '--porcelain', '-z', '--untracked-files=all'],
                              cwd=repo, capture_output=True, text=True, encoding='utf-8',
-                             errors='replace', timeout=15, stdin=subprocess.DEVNULL).stdout
+                             errors='replace', timeout=15, stdin=subprocess.DEVNULL,
+                             **NO_WINDOW).stdout
     except (OSError, subprocess.SubprocessError):
         return []
     entries, paths = out.split('\0'), []
@@ -4056,7 +4574,67 @@ def porcelain_paths(repo):
     return paths
 
 
-def implementation_place(repo, cfg=None, plan=None):
+def file_state(path):
+    """A short content hash of a file (a symlink: of its target); None when it does not exist."""
+    try:
+        if path.is_symlink():
+            data = b'link:' + os.readlink(path).encode()
+        elif path.is_file():
+            data = path.read_bytes()
+        else:
+            return None
+    except OSError:
+        return None
+    return hashlib.sha1(data).hexdigest()[:16]
+
+
+def dirty_snapshot(repo):
+    """{path: content hash, None when deleted} for every changed, added or untracked file.
+
+    Renames count as a deletion plus a new file, so each side can be moved on its own.
+    """
+    try:
+        out = subprocess.run(['git', 'status', '--porcelain', '-z', '--untracked-files=all',
+                              '--no-renames'], cwd=repo, capture_output=True, text=True,
+                             encoding='utf-8', errors='replace', timeout=15,
+                             stdin=subprocess.DEVNULL,
+                             **NO_WINDOW).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    snap = {}
+    for entry in out.split('\0'):
+        if len(entry) >= 4:
+            snap[entry[3:]] = file_state(Path(repo) / entry[3:])
+    return snap
+
+
+def flow_baseline(flow):
+    """The dirty files when the flow started (its first session), or None when unknown."""
+    root = state_root() / 'sessions'
+    if not flow or not root.exists():
+        return None
+    for d in sorted(root.iterdir()):
+        meta = read_json(d / 'session.json', {}) or {}
+        if meta.get('flow') == flow and isinstance(meta.get('baseline'), dict):
+            return meta['baseline']
+    return None
+
+
+def session_changes(repo, baseline):
+    """What a move to a new worktree takes: {'move': [...], 'keep': [...]}.
+
+    move: files changed or created since the flow started; they go to the worktree and this
+    checkout gets them back as in HEAD. keep: files that had changes before the flow and changed
+    again; they are copied, but stay here too, because the earlier changes are not the flow's.
+    Files that only had changes before the flow are not touched.
+    """
+    now_ = dirty_snapshot(repo)
+    move = sorted(p for p in now_ if p not in baseline)
+    keep = sorted(p for p in now_ if p in baseline and baseline[p] != now_[p])
+    return {'move': move, 'keep': keep, 'state': now_}
+
+
+def implementation_place(repo, cfg=None, plan=None, baseline=None, ticket=None, summary=None):
     """Where the implementation run should work, and the recommended choice for this checkout.
 
     The runner can make a worktree only from the default branch, and a run on a feature branch
@@ -4087,17 +4665,23 @@ def implementation_place(repo, cfg=None, plan=None):
             plan_rel = None
     dirty = [path for path in porcelain_paths(repo) if path != plan_rel]
     use_worktree = str(cfg.get('use_worktree', '')).lower() == 'true'
+    plan_ignored = bool(plan_rel and ignored_paths(repo, [plan_rel]))
     checkout = 'worktree' if linked else 'main checkout'
     here_text = (f'this worktree, branch {branch}' if linked and not on_default
                  else f'this checkout, branch {branch}' if not on_default
                  else f'a new branch in this {"worktree" if linked else "checkout"}')
-    plan_meta = {'argv': ['ralphex'], 'target': str(plan or 'plan.md')}
-    new_path = str(sibling_path(repo, plan_branch(plan_meta))) if plan else \
-        str(sibling_path(repo, '<plan branch>'))
-    worktree = {'option': 'worktree', 'run_args': ['--new-worktree'], 'usable': True,
-                'reason': None, 'path': new_path,
+    names = run_names(repo, plan, ticket, summary) if plan else None
+    new_path = names['path'] if names else str(sibling_path(repo, '<plan branch>'))
+    name_args = ['--branch', names['branch']] if names and names['branch'] != names['slug'] else []
+    worktree = {'option': 'worktree', 'usable': True, 'reason': None, 'path': new_path,
+                'run_args': ['--new-worktree'] + name_args
+                + (['--worktree-path', new_path] if names and names['custom'] else []),
                 'text': f'a new worktree in {new_path} from {default or branch}'}
-    here = {'option': 'here', 'run_args': [], 'usable': True, 'reason': None, 'text': here_text}
+    if baseline is not None:
+        changes = session_changes(repo, baseline)
+        worktree.update(moves=changes['move'], keeps=changes['keep'])
+    here = {'option': 'here', 'run_args': name_args if on_default else [], 'usable': True,
+            'reason': None, 'text': here_text}
     if not branch:
         worktree.update(usable=False, reason='HEAD is detached')
         here.update(usable=False, reason='HEAD is detached: check out a branch first')
@@ -4120,9 +4704,14 @@ def implementation_place(repo, cfg=None, plan=None):
             here.update(usable=False, reason=reason)
     if worktree['usable'] and (not linked or not here['usable']):
         recommended = 'worktree'
+        moved = worktree.get('moves') or []
+        others = [d for d in dirty if d not in moved]
         why = ('planned on the default branch: the run gets its own worktree and branch in '
                'workspaces/, and this checkout stays on ' + (default or branch)
-               + (' with your uncommitted files' if dirty else ''))
+               + (' with your other uncommitted files' if others and moved
+                  else ' with your uncommitted files' if others else '')
+               + (f'; the {len(moved)} file(s) changed during this flow move there, and this '
+                  'checkout gets them back as committed' if moved else ''))
     elif here['usable']:
         recommended = 'here'
         why = (f'already in a worktree on {branch}: work stays in it' if linked and not on_default
@@ -4134,6 +4723,11 @@ def implementation_place(repo, cfg=None, plan=None):
     return {'checkout': checkout, 'branch': branch or None, 'default_branch': default or None,
             'on_default': on_default, 'dirty': dirty, 'operation': operation,
             'use_worktree': use_worktree, 'recommended': recommended, 'why': why,
+            'plan_ignored': plan_ignored, 'names': names,
+            'warnings': ([f'git ignores the plan {plan_rel}: it is copied to a new worktree but '
+                          'not committed, and the runner cannot archive it to completed/ at the '
+                          'end. Remove its folder from .gitignore to keep plans in git']
+                         if plan_ignored else []),
             'options': [o for o in (worktree, here) if o['option'] == recommended]
             + [o for o in (worktree, here) if o['option'] != recommended]}
 
@@ -4144,7 +4738,7 @@ REPO_CONFIGS = ('.ralphex/config', '.agrouter/config', '.autopilot/config')
 WORKTREE_PATH = '{parent}/workspaces/{repo}/{Name}'
 
 
-def sibling_path(repo, branch):
+def sibling_path(repo, branch, names=None):
     """Folder for a new worktree, in the workspaces layout: <parent>/workspaces/<repo>/<Name>.
 
     <parent> is the folder that holds the main checkout (also when repo is a linked worktree),
@@ -4158,10 +4752,74 @@ def sibling_path(repo, branch):
         else Path(repo)
     safe = re.sub(r'[^A-Za-z0-9._-]+', '-', branch).strip('-') or 'run'
     pattern = autopilot_config('worktree').get('path') or WORKTREE_PATH
-    path = pattern.format(parent=main.parent, repo=main.name, branch=safe,
-                          Name=safe[:1].upper() + safe[1:])
+    extra = {k: re.sub(r'[^A-Za-z0-9._-]+', '-', str(v)).strip('-')
+             for k, v in (names or {}).items() if k in ('slug', 'ticket', 'summary')}
+    extra.setdefault('slug', safe)
+    extra.setdefault('ticket', '')
+    extra.setdefault('summary', '')
+    try:
+        path = pattern.format(parent=main.parent, repo=main.name, branch=safe,
+                              Name=safe[:1].upper() + safe[1:], **extra)
+    except (KeyError, IndexError, ValueError):
+        path = WORKTREE_PATH.format(parent=main.parent, repo=main.name, branch=safe,
+                                    Name=safe[:1].upper() + safe[1:])
+    path = re.sub(r'-{2,}', '-', path).replace('/-', '/').replace('-/', '/')
     path = Path(path).expanduser()
     return path if path.is_absolute() else main / path
+
+
+TICKET_RE = re.compile(r'\b([A-Z][A-Z0-9]{1,9}-\d+)\b')
+
+
+def plan_heading(plan):
+    """The plan's first heading without a "Plan:" prefix, or None."""
+    try:
+        for line in Path(plan).read_text(encoding='utf-8', errors='replace').splitlines():
+            if line.startswith('# '):
+                return re.sub(r'(?i)^(implementation\s+)?plan:\s*', '', line[2:]).strip() or None
+    except OSError:
+        pass
+    return None
+
+
+def run_names(repo, plan, ticket=None, summary=None):
+    """The branch and worktree folder for a run, after the repository's naming convention.
+
+    [worktree] branch (default {slug}) and path (default the workspaces layout) know {slug}
+    (the plan file name without its date), {ticket} and {summary}. A ticket is taken from the
+    argument, else found in the current branch, the plan file name or the plan title
+    (ABC-123). The summary is the argument, else the plan title. A pattern that needs a ticket
+    nobody gave falls back to {slug} and lists it in `needs`.
+    """
+    cfg = autopilot_config('worktree')
+    slug = plan_branch({'argv': ['ralphex'], 'target': str(plan)})
+    title = plan_heading(plan) if plan else None
+    if not ticket:
+        _, current = run_quiet(['git', 'branch', '--show-current'], cwd=repo)
+        for text in (current, Path(str(plan)).name, title):
+            m = TICKET_RE.search(text or '')
+            if m:
+                ticket = m.group(1)
+                break
+    summary = summary or title or slug
+    pattern = cfg.get('branch') or '{slug}'
+    path_pattern = cfg.get('path') or WORKTREE_PATH
+    needs = [k for k, v in (('ticket', ticket),)
+             if '{' + k + '}' in pattern + path_pattern and not v]
+    values = {'slug': slug, 'ticket': ticket or '',
+              'summary': re.sub(r'[^A-Za-z0-9._-]+', '-', summary).strip('-')}
+    branch = slug
+    if not needs:
+        try:
+            branch = pattern.format(**values)
+        except (KeyError, IndexError, ValueError):
+            branch = slug
+        branch = re.sub(r'[^A-Za-z0-9._/-]+', '-', branch)
+        branch = re.sub(r'-{2,}', '-', re.sub(r'/{2,}', '/', branch)).strip('-/') or slug
+    path = sibling_path(repo, branch, values if not needs else None)
+    return {'branch': branch, 'path': str(path), 'slug': slug, 'ticket': ticket,
+            'summary': summary, 'pattern': pattern, 'needs': needs,
+            'custom': branch != slug or bool(cfg.get('path'))}
 
 
 def worktree_of(repo, branch):
@@ -4176,13 +4834,53 @@ def worktree_of(repo, branch):
     return None
 
 
-def prepare_worktree(repo, plan, cli_args, path=None):
+def ignored_paths(repo, paths):
+    """The paths git ignores in repo (tracked files never count as ignored)."""
+    if not paths:
+        return []
+    code, out = run_quiet(['git', 'check-ignore', '--', *paths], cwd=repo)
+    return [line.strip() for line in out.splitlines() if line.strip()] if code == 0 else []
+
+
+def restore_paths(repo, paths):
+    """Give paths back their HEAD state in repo: tracked ones checked out, new ones removed."""
+    repo = Path(repo)
+    tracked = [p for p in paths if run_quiet(['git', 'cat-file', '-e', f'HEAD:{p}'], cwd=repo)[0] == 0]
+    new = [p for p in paths if p not in tracked]
+    problems = []
+    for i in range(0, len(tracked), 100):
+        code, out = run_quiet(['git', 'checkout', 'HEAD', '--', *tracked[i:i + 100]], cwd=repo,
+                              timeout=60)
+        if code != 0:
+            problems.append(out[-200:])
+    if new:
+        run_quiet(['git', 'rm', '-q', '--cached', '--ignore-unmatch', '--', *new], cwd=repo)
+    for p in new:
+        f = repo / p
+        try:
+            if f.is_symlink() or f.is_file():
+                f.unlink()
+            parent = f.parent
+            while parent != repo and parent.is_dir() and not any(parent.iterdir()):
+                parent.rmdir()
+                parent = parent.parent
+        except OSError as exc:
+            problems.append(f'{p}: {exc}')
+    return problems
+
+
+def prepare_worktree(repo, plan, cli_args, path=None, baseline=None):
     """Make (or reuse) the run's worktree in workspaces/, with the plan and repo configs in it.
 
     The runner's own --worktree puts it in .ralphex/worktrees/ inside the checkout; autopilot
-    makes it in the workspaces layout instead (sibling_path) and runs the runner there on the new branch, which the
-    runner then uses in place. An uncommitted plan and uncommitted repository configs are
-    copied and committed on the new branch, so the run sees them; the source files stay.
+    makes it in the workspaces layout instead (sibling_path) and runs the runner there on the
+    new branch, which the runner then uses in place. An uncommitted plan and uncommitted
+    repository configs are copied and committed on the new branch, so the run sees them.
+
+    With the flow's baseline (the dirty files when the flow started), every file changed or
+    created during the flow moves: it is copied (a deletion repeated) and committed in the new
+    worktree, and this checkout gets it back as in HEAD. A file that had changes before the
+    flow is copied but kept here. Without a baseline the source files stay.
     """
     repo = Path(repo)
     branch = plan_branch({'argv': ['ralphex', *cli_args], 'target': str(plan)})
@@ -4191,7 +4889,8 @@ def prepare_worktree(repo, plan, cli_args, path=None):
     existing = worktree_of(repo, branch)
     if existing and Path(existing).resolve() != repo.resolve():
         return {'path': existing, 'branch': branch, 'base': base, 'plan': str(Path(existing) / rel),
-                'reused': True, 'copied': []}
+                'reused': True, 'copied': [], 'removed': [], 'moved': [], 'kept_here': [],
+                'restore_problems': [], 'ignored': []}
     if existing:
         die(f'{branch} is checked out in this folder: run here instead of in a new worktree')
     target = Path(path) if path else sibling_path(repo, branch)
@@ -4208,30 +4907,60 @@ def prepare_worktree(repo, plan, cli_args, path=None):
     code, out = run_quiet(argv, cwd=repo, timeout=120)
     if code != 0:
         die(f'git worktree add failed: {out[-300:]}')
-    dirty = set(porcelain_paths(repo))
-    copied = []
-    wanted = [rel.as_posix()] + ([] if has_branch else [
+    plan_rel = rel.as_posix()
+    move, keep = [], []
+    if baseline is not None and not has_branch:
+        changes = session_changes(repo, baseline)
+        state, move, keep = changes['state'], changes['move'], changes['keep']
+    else:
+        state = dirty_snapshot(repo)
+    dirty = set(state)
+    wanted = [plan_rel] + ([] if has_branch else [
         c for c in dirty if c in REPO_CONFIGS or c.startswith('.ralphex/scripts/')])
+    wanted = list(dict.fromkeys(wanted + move + keep))
+    copied, removed = [], []
     for name in wanted:
         src, dst = repo / name, target / name
-        if src.is_file() and (name in dirty or not dst.exists()):
+        if name in dirty and state.get(name) is None and not src.exists():
+            # deleted during the flow: delete it on the new branch too
+            if run_quiet(['git', 'rm', '-q', '--ignore-unmatch', '--', name], cwd=target)[0] == 0:
+                removed.append(name)
+        elif (src.is_file() or src.is_symlink()) and (name in dirty or not dst.exists()):
             dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
+            if dst.is_symlink() or dst.exists():
+                dst.unlink()
+            shutil.copy2(src, dst, follow_symlinks=False)
             copied.append(name)
-    if copied:
-        run_quiet(['git', 'add', '--', *copied], cwd=target)
-        code, out = run_quiet(['git', 'commit', '-m', f'add plan: {branch}'], cwd=target, timeout=60)
+    # an ignored file (a plans folder in .gitignore) is copied but cannot be committed: git
+    # add refuses it. The run still reads it; the runner cannot archive it later.
+    ignored = ignored_paths(target, copied)
+    staged = [p for p in copied if p not in ignored]
+    if staged or removed:
+        if staged:
+            code, out = run_quiet(['git', 'add', '--', *staged], cwd=target)
+            if code != 0:
+                die(f'could not stage {", ".join(staged[:5])} in {target}: {out[-300:]}')
+        extra = [p for p in staged + removed if p != plan_rel and p not in REPO_CONFIGS
+                 and not p.startswith('.ralphex/scripts/')]
+        msg = f'add plan and flow changes: {branch}' if extra else f'add plan: {branch}'
+        code, out = run_quiet(['git', 'commit', '-m', msg], cwd=target, timeout=60)
         if code != 0:
             die(f'could not commit the plan in {target}: {out[-300:]}')
+    # only after the commit holds them: give this checkout its files back as in HEAD
+    moved = [p for p in move if (p in copied and p not in ignored) or p in removed]
+    problems = restore_paths(repo, moved) if moved else []
     return {'path': str(target), 'branch': branch, 'base': base, 'plan': str(target / rel),
-            'reused': False, 'copied': copied}
+            'reused': False, 'copied': copied, 'removed': removed, 'moved': moved,
+            'kept_here': [p for p in keep if p in copied], 'restore_problems': problems,
+            'ignored': ignored}
 
 
 def cmd_place(args):
     repo = git_root()
     if not repo:
         die('not inside a git repository')
-    emit(implementation_place(repo, plan=args.plan))
+    emit(implementation_place(repo, plan=args.plan, baseline=flow_baseline(args.flow),
+                              ticket=args.ticket, summary=args.summary))
 
 
 def remote_host(url):
@@ -4368,7 +5097,7 @@ def cmd_report(args):
             'minutes': round(((st.get('ended') or now()) - meta.get('created', now())) / 60, 1),
             'attempts': st.get('attempt'), 'tasks': st.get('tasks'),
             'executor': meta.get('executor'), 'models_used': st.get('models_used', {}),
-            'task_log': st.get('task_log', {}),
+            'task_log': st.get('task_log', {}), 'steps': st.get('steps', []),
             'router_fallbacks': st.get('router_fallbacks', []),
             'restarts': st.get('restarts', []), 'last_error': st.get('last_error'),
             'errors': st.get('errors', []), 'phases': [
@@ -4521,6 +5250,7 @@ def main(argv=None):
     s.add_argument('--new-worktree', action='store_true',
                    help='make a worktree in <parent>/workspaces/<repo>/<Name> and run there')
     s.add_argument('--worktree-path', help='folder for the new worktree (implies --new-worktree)')
+    s.add_argument('--branch', help='name of the run branch (passed to the runner as --branch)')
     s.set_defaults(fn=cmd_run)
     s = sub.add_parser('wait')
     s.add_argument('session')
@@ -4629,6 +5359,9 @@ def main(argv=None):
     s.set_defaults(fn=cmd_publish)
     s = sub.add_parser('place')
     s.add_argument('--plan', help='the plan file (an uncommitted plan does not count as dirty)')
+    s.add_argument('--flow', help='the flow: lists the files a new worktree takes from here')
+    s.add_argument('--ticket', help='ticket id for {ticket} in [worktree] branch/path patterns')
+    s.add_argument('--summary', help='text for {summary} (default: the plan title)')
     s.set_defaults(fn=cmd_place)
     s = sub.add_parser('list')
     s.add_argument('--all', action='store_true')
@@ -4681,6 +5414,14 @@ def main(argv=None):
     s.set_defaults(fn=cmd_config_show)
     s = sub.add_parser('catalog')
     s.set_defaults(fn=cmd_catalog)
+    s = sub.add_parser('compact')
+    s.add_argument('--flow', required=True)
+    s.add_argument('--handoff', required=True, help='file the chat reads after the compaction')
+    s.add_argument('--focus', help='the /compact instructions (a default names the flow)')
+    s.set_defaults(fn=cmd_compact)
+    s = sub.add_parser('_compact')
+    s.add_argument('request')
+    s.set_defaults(fn=cmd_compact_helper)
     s = sub.add_parser('_supervise')
     s.add_argument('sdir')
     s.set_defaults(fn=cmd_supervise)

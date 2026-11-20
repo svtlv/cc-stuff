@@ -84,7 +84,14 @@ plan file path.
 **What was done:** the `summarize` bullets for the branch changes, with
 links to the code. Then the plan tasks as a table:
 | Task | Status ✓/✗/– | What was done | Model | Minutes | Commit |
-Take the last four columns from each run session's `task_log`: "What was
+Then the review steps as a second table, from the session's `steps`
+(phases other than "implementing tasks"):
+| Step | Model and effort | Chosen by |
+Give "Chosen by" from `how` for every row: agrouter, the config key and
+file, a run flag, or the CLI default. A row with "not reported" says so;
+never guess a model. Take the task table's last four columns from each
+run session's `task_log`; add `how` from the task's `task-start` step in
+`steps` to its Model cell: "What was
 done" is `did` and `changes` (shorten to one line), or `about` with "not
 finished" for a task that did not end.
 
@@ -99,7 +106,7 @@ one next step.
 Do not add other sections. Problems that autopilot solved are already
 rows in "Decided without you". Routine restarts need only a count in the
 **Result** line when there are any. Give the executor and models used
-only in the task table.
+only in the task and step tables.
 
 ## Delivery
 

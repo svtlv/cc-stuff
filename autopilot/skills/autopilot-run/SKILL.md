@@ -4,7 +4,7 @@ description: This skill should be used when the user runs "/autopilot-run" or "$
 argument-hint: "<plan file> [-- extra runner flags such as --tasks-only]"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, Agent, CronCreate, CronDelete
 metadata:
-  version: "0.7.0"
+  version: "0.8.0"
 ---
 
 # Autopilot Run

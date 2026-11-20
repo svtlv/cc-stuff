@@ -4,7 +4,7 @@ description: This skill should be used when the user runs "/autopilot" or "$auto
 argument-hint: "[task description | path to an existing plan file] [-- extra runner flags]"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, Skill, Agent, CronCreate, CronDelete
 metadata:
-  version: "0.7.0"
+  version: "0.8.0"
 ---
 
 # Autopilot
@@ -121,8 +121,16 @@ report.
 ## Step 4 — Decide
 
 This is the user's main checkpoint: give time to read the plan and the
-explanation. First run `AP place --plan <path>`. It decides where the run
-works best in this checkout ("Where the Run Works" below). Ask one question
+explanation. First run `AP place --plan <path> --flow <id>`. It decides
+where the run works best in this checkout ("Where the Run Works" below).
+For a new worktree it also lists `moves`, the files that go with the run.
+Pass `--ticket <ID>` when the task names a ticket. `names` holds the
+proposed branch and folder, after `[worktree] branch` and `path` in
+`.autopilot/config`. Show both in the question. When `names.needs` lists
+`ticket`, ask for it in the same question; without a reply the run uses
+the plan name and logs that. On a new ticket or other names, run `place`
+again with them. Post every line of `warnings` (for example a plan that
+git ignores). Ask one question
 in plain text, recommending **Implement in the recommended place** (or
 Revise, when the explanation surfaced a concrete problem), with the
 deadline as a clock time ("Asking" in `references/response-times.md`).
@@ -135,8 +143,8 @@ the plan now?" --waited <N>` when the timer expired.
 
 | Option | Effect |
 |---|---|
-| Implement in the recommended place (`place.options[0]`) | Step 5 with that option's `run_args` (`--new-worktree` for a new worktree, none for here). Name the place, its `path` and `place.why`. |
-| Implement in the other place (`place.options[1]`) | Only when it is `usable`; otherwise show it with its `reason`, not as a choice. |
+| Implement in the recommended place (`place.options[0]`) | Step 4b, then Step 5 with that option's `run_args` (`--new-worktree` for a new worktree, none for here). Name the place, its `path` and `place.why`. For a new worktree, say how many files move there (`moves`) and that this checkout gets them back as committed. |
+| Implement in the other place (`place.options[1]`) | Only when it is `usable`; otherwise show it with its `reason`, not as a choice. Then Step 4b and Step 5. |
 | Revise the plan | Ask what to change, then run one revision round per `references/plan-revision.md` (direct edit for small changes, re-plan for a new approach), show what changed, and ask this question again with a fresh timer. Repeat as often as the user wants. |
 | Stop here | Go to Step 6. The report names the plan and the command to run it later, in the host's form ("Naming the Commands" in `references/hosts.md`). |
 
@@ -157,6 +165,28 @@ Plan explained above. Implement it now?
 I'll start option 1 at 16:40 (in 60 min) if you don't answer.
 ```
 
+## Step 4b — Compact Before the Run
+
+Planning fills the context with questions, drafts and reviews that the run
+does not need. Compact the chat once, after the decision to implement and
+before the run starts. Skip this step when the user chose Revise or Stop.
+
+1. Write a handoff file in the plan session folder (`handoff.md`): the flow
+   id, the plan path, the chosen place with its `run_args`, the base branch,
+   the publish choice, wishes the user gave for the run, and the driver path.
+2. Log it: `AP log <plan-session> --kind decision --by autopilot --text
+   "compact the context before the run" --reason "planning is done"`.
+3. Run `AP compact --flow <id> --handoff <file>`.
+   - `ok: true`: post one line ("Planning is done. I compact the context,
+     then start the run.") and end the turn at once. Start no background
+     command. The driver types `/compact` into this chat after the turn
+     ends, then types its `resume_line`.
+   - `ok: false`: post `skipped` in one line and go on with Step 5 now.
+4. On the resume line, read the handoff file and continue with Step 5.
+
+The user can also write while this happens: the host queues the message,
+and the chat answers it after the compaction.
+
 ### Where the Run Works
 
 The runner can make a worktree only from the default branch. A run on a
@@ -171,10 +201,14 @@ example `~/Projects/workspaces/ralphex/Add-cache`). `[worktree] path` in
 current branch. When a worktree for the branch exists already (made by
 any tool, or by hand), autopilot uses it. Only `git` is needed, so this
 works the same in Claude Code and Codex. `AP run --new-worktree` makes it with
-`git worktree add`, copies an uncommitted plan and uncommitted repository
-configs into it, commits them there ("add plan: <branch>"), and starts the
-runner inside it. The current folder never switches branch, and its other
-uncommitted files stay where they are. The worktree is kept after the run
+`git worktree add` and starts the runner inside it. Pass `--flow <id>`.
+It moves every file changed, created or deleted during the flow into the
+worktree, with the plan and uncommitted repository configs. It commits
+them there ("add plan and flow changes: <branch>"). This checkout then
+gets those files back as in HEAD, so it is clean of the flow's work. Files
+that had changes before the flow started stay here; when the flow changed
+them again, only a copy moves. The current folder never switches branch.
+The run session logs what moved. The worktree is kept after the run
 for review; the report gives its path. The runner's own `--worktree`
 (inside `.ralphex/worktrees/`) is not used.
 

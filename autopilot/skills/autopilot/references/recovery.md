@@ -27,7 +27,7 @@ or the same error three times.
 | `not a git repository` / `repository root` | `cd` to `git rev-parse --show-toplevel` and start again. | yes |
 | `plan file ... not found` (plan moved to `completed/`) | Look in `<plans_dir>/completed/`. When every task is checked, the run is done: go to the report. | yes |
 | `spec_problems` in `doctor`, or Codex rejecting a model (`model ... not found/supported`) under the Codex executor | Phase specs name the other executor's models (often inherited globally). Start again with `-- --plan-model=: --task-model=: --review-model=:` for this run, log it, and recommend the permanent fix in `.ralphex/config` ("Recipe: Codex Executor"). | yes (run flags only) |
-| `codex` too old, or `codex login status` not logged in | Needs the user: show the upgrade or login command. | no |
+| `codex` too old, or `codex login status` not logged in | Needs the user: show the upgrade or login command. A custom `model_provider` skips this check. | no |
 | Codex missing or logged out during the external review | Handled by the driver: it restarts the run without the review (`review-skipped`). Report it; offer `codex login` or `external_review_tool = none` for later. | yes (automatic) |
 | `unknown flag` / `unknown option` | Remove the offending flag from the extra arguments or the config line it came from; start again. | yes |
 | `agrouter: ... config` / exit 2 from the router | `AP config-show` the router configs, fix the key named in the error per `config-recipes.md`. | yes, except the API key |

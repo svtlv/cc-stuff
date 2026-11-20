@@ -1,5 +1,6 @@
 """Exercise the autopilot driver against a fake plan runner CLI."""
 import json
+import re
 import os
 import shutil
 from pathlib import Path
@@ -593,7 +594,8 @@ class AutopilotDriver(unittest.TestCase):
             if rep['status'] == 'done':
                 break
         self.assertEqual([u for u in updates if not u.startswith('✓ Run')], [
-            '▶ Task 1/2 started: one · claude-opus-5-5 (xhigh) · steps 0/3\n   Plan: a; b',
+            '▶ Task 1/2 started: one · claude-opus-5-5 (xhigh) · chosen by agrouter · steps 0/3'
+            '\n   Plan: a; b',
             '✓ Task 1/2 done in 0 min: one · claude-opus-5-5 (xhigh) · steps 2/3 · '
             + updates[1].split('\n')[0].rsplit(' · ', 1)[1]
             + '\n   Done: a; b · 1 file (+2 -0): cache.py',
@@ -601,10 +603,10 @@ class AutopilotDriver(unittest.TestCase):
             'classify stage). Not chosen by agrouter; runs on claude defaults: model '
             'claude-opus-5-5 (verified default), effort unknown (claude did not report it).',
             '▶ Task 2/2 started: two · claude-opus-5-5 (default effort) [router fallback] · '
-            'steps 2/3\n   Plan: c',
+            'claude default (router fallback) · steps 2/3\n   Plan: c',
             '✓ Task 2/2 done in 0 min: two · claude-opus-5-5 (default effort) [router fallback] · '
             'steps 3/3 · ' + updates[4].split('\n')[0].rsplit(' · ', 1)[1] + '\n   Done: c',
-            '▶ Code review: claude review 1 · claude-opus-5-5 (high)',
+            '▶ Code review: claude review 1 · claude-opus-5-5 (high) · chosen by agrouter',
             updates[6]])
         self.assertTrue(updates[1].split('\n')[0].endswith(' Task 1: one'))
         self.assertTrue(updates[4].split('\n')[0].endswith(' Task 2: two'))
@@ -1710,6 +1712,68 @@ class ImplementationPlace(unittest.TestCase):
         place = self.place(path)
         self.assertEqual((place['checkout'], place['recommended']), ('worktree', 'here'))
 
+    def test_new_worktree_takes_the_flow_changes_and_cleans_this_checkout(self):
+        (self.repo / 'old.txt').write_text('old')
+        (self.repo / 'gone.txt').write_text('gone')
+        git(self.repo, 'add', '.')
+        git(self.repo, 'commit', '-qm', 'more')
+        (self.repo / 'wip.txt').write_text('before the flow')        # dirty before, untouched
+        (self.repo / 'both.txt').write_text('before')                 # dirty before, changed again
+        baseline = autopilot.dirty_snapshot(self.repo)
+        self.assertEqual(sorted(baseline), ['both.txt', 'wip.txt'])
+        plan = self.repo / 'docs/plans/20261116-add-cache.md'
+        plan.parent.mkdir(parents=True)
+        plan.write_text('### Task 1: a\n- [ ] a\n')
+        (self.repo / 'src').mkdir()
+        (self.repo / 'src/new.py').write_text('print(1)')
+        (self.repo / 'README.md').write_text('changed in the flow')
+        (self.repo / 'gone.txt').unlink()
+        (self.repo / 'both.txt').write_text('before and after')
+        place = self.place(plan=plan, cfg=None)
+        p = autopilot.implementation_place(str(self.repo), {}, plan, baseline)
+        self.assertEqual(p['options'][0]['moves'],
+                         ['README.md', 'docs/plans/20261116-add-cache.md', 'gone.txt', 'src/new.py'])
+        self.assertEqual(p['options'][0]['keeps'], ['both.txt'])
+        self.assertNotIn('moves', place['options'][0])
+        env = {'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@t',
+               'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@t'}
+        with unittest.mock.patch.dict(os.environ, env):
+            wt = autopilot.prepare_worktree(str(self.repo), plan, [], baseline=baseline)
+        path = Path(wt['path'])
+        self.assertEqual(wt['moved'], ['README.md', 'docs/plans/20261116-add-cache.md',
+                                       'gone.txt', 'src/new.py'])
+        self.assertEqual((wt['kept_here'], wt['removed'], wt['restore_problems']),
+                         (['both.txt'], ['gone.txt'], []))
+        # the new branch holds every flow change in one commit, and a clean tree
+        self.assertEqual((path / 'README.md').read_text(), 'changed in the flow')
+        self.assertEqual((path / 'src/new.py').read_text(), 'print(1)')
+        self.assertEqual((path / 'both.txt').read_text(), 'before and after')
+        self.assertFalse((path / 'gone.txt').exists())
+        self.assertFalse((path / 'wip.txt').exists())
+        log = subprocess.check_output(['git', 'log', '--oneline', '-1'], cwd=path, text=True)
+        self.assertIn('add plan and flow changes: add-cache', log)
+        self.assertEqual(autopilot.porcelain_paths(path), [])
+        # this checkout is back to HEAD, except the files that had changes before the flow
+        self.assertEqual((self.repo / 'README.md').read_text(), 'x')
+        self.assertTrue((self.repo / 'gone.txt').exists())
+        self.assertFalse((self.repo / 'src').exists())
+        self.assertFalse(plan.exists())
+        self.assertEqual(sorted(autopilot.porcelain_paths(self.repo)), ['both.txt', 'wip.txt'])
+        self.assertEqual((self.repo / 'both.txt').read_text(), 'before and after')
+
+    def test_flow_baseline_comes_from_the_first_session(self):
+        state = Path(self.tmp.name) / 'state'
+        for name, meta in (('20261101-000001-plan-aaaa', {'flow': 'f1', 'baseline': {'a': 'h'}}),
+                           ('20261101-000002-run-bbbb', {'flow': 'f1'}),
+                           ('20261101-000003-plan-cccc', {'flow': 'f2', 'baseline': {}})):
+            (state / 'sessions' / name).mkdir(parents=True)
+            (state / 'sessions' / name / 'session.json').write_text(json.dumps(meta))
+        with unittest.mock.patch.dict(os.environ, {'AUTOPILOT_STATE_DIR': str(state)}):
+            self.assertEqual(autopilot.flow_baseline('f1'), {'a': 'h'})
+            self.assertEqual(autopilot.flow_baseline('f2'), {})
+            self.assertIsNone(autopilot.flow_baseline('f3'))
+            self.assertIsNone(autopilot.flow_baseline(None))
+
     def test_worktree_path_follows_the_workspaces_layout_or_the_config(self):
         wt = Path(self.tmp.name) / 'wt'
         git(self.repo, 'worktree', 'add', '-q', '-b', 'side', str(wt))
@@ -2168,6 +2232,90 @@ class SupervisorUnits(unittest.TestCase):
         self.assertEqual(self.sup.state['model'],
                          {'cli': 'codex', 'model': 'gpt-6.1-sol', 'effort': 'high'})
 
+    def run_supervisor(self, ralphex_cfg, cli_args=(), router_cfg='', executor='claude'):
+        repo = Path(self.tmp.name) / 'repo'
+        (repo / '.ralphex/scripts').mkdir(parents=True)
+        (repo / '.agrouter').mkdir()
+        (repo / '.ralphex/config').write_text(ralphex_cfg)
+        (repo / '.ralphex/scripts/codex-agrouter.sh').write_text('exec agrouter exec codex -- "$@"\n')
+        (repo / '.agrouter/config').write_text('[agrouter]\nlog_dir = .agrouter/logs\n' + router_cfg)
+        sdir = Path(self.tmp.name) / 'run'
+        (sdir / 'inbox').mkdir(parents=True)
+        autopilot.write_json(sdir / 'session.json', {
+            'kind': 'run', 'target': 'p.md', 'repo': str(repo), 'executor': executor,
+            'argv': ['ralphex', 'p.md', *cli_args], 'cli_args': list(cli_args),
+            'policy': autopilot.load_policy()})
+        none = Path(self.tmp.name) / 'none'
+        patch = unittest.mock.patch.dict(os.environ, {'RALPHEX_CONFIG_DIR': str(none),
+                                                      'AGROUTER_CONFIG_DIR': str(none)})
+        patch.start()
+        self.addCleanup(patch.stop)
+        sup = autopilot.Supervisor(sdir)
+        self.addCleanup(sup.log.close)
+        return sup, repo
+
+    def test_every_step_says_its_model_and_who_chose_it(self):
+        sup, repo = self.run_supervisor(
+            'claude_command = agrouter\nreview_model = :high\ncodex_command = '
+            '.ralphex/scripts/codex-agrouter.sh\n', ['--task-model=opus:xhigh'])
+        log = repo / '.agrouter/logs/agrouter.log'
+        log.parent.mkdir(parents=True)
+        log.write_text('2026-11-19T16:25:25Z pid=1 agrouter: selection: {"cli":"codex",'
+                       '"model":"gpt-6.2-sol","effort":"xhigh"}\n')
+        events = lambda kind: [e for e in sup.state['events'] if e['kind'] == kind]
+        sup.scan_line('--- task iteration 1 ---')
+        sup.scan_line('agrouter: selection: {"cli":"claude","model":"claude-opus-5-5","effort":"xhigh"}')
+        sup.scan_line('--- claude review 0: all findings ---')
+        sup.scan_line('agrouter: selection: {"cli":"claude","model":"claude-sonnet-5-5","effort":"high"}')
+        # the first codex call shows the banner
+        sup.scan_line('--- codex iteration 1 ---')
+        sup.scan_line('model: gpt-6.2-sol')
+        sup.scan_line('reasoning effort: xhigh')
+        # later codex calls show nothing: the choice is only in agrouter's log
+        sup.scan_line('--- codex iteration 2 ---')
+        with open(log, 'a') as fh:
+            fh.write('2026-11-19T16:30:56Z pid=2 agrouter: selection: {"cli":"codex",'
+                     '"model":"gpt-6.2-sol","effort":"high"}\n')
+        sup.step['at'] -= 30
+        sup.track_progress()
+        # nothing logged and nothing printed: say so, never "runner default model"
+        sup.scan_line('--- codex iteration 3 ---')
+        sup.step['at'] -= 30
+        sup.track_progress()
+        task = events('task-start')[0]
+        self.assertEqual(task['how'], 'set by --task-model=opus:xhigh on the run')
+        phases = events('phase-start')
+        self.assertEqual([p['how'] for p in phases], [
+            'model chosen by agrouter, effort set by review_model = :high in .ralphex/config',
+            'chosen by agrouter', 'chosen by agrouter', 'not reported'])
+        self.assertEqual(phases[2]['model'], {'cli': 'codex', 'model': 'gpt-6.2-sol', 'effort': 'high'})
+        self.assertEqual(phases[2]['via'], 'agrouter log')
+        lines = [autopilot.event_line(p) for p in phases]
+        self.assertEqual(lines[2], '▶ External review: codex iteration 2 · gpt-6.2-sol (high) · '
+                                   'chosen by agrouter')
+        self.assertIn('model and effort not reported by the runner', lines[3])
+        self.assertNotIn('runner default', lines[3])
+        self.assertIn('set by --task-model=opus:xhigh on the run', autopilot.event_line(task))
+        self.assertEqual([s['how'] for s in sup.state['steps']][:2],
+                         ['set by --task-model=opus:xhigh on the run', phases[0]['how']])
+
+    def test_pinned_codex_review_and_unrouted_claude_say_so(self):
+        sup, _ = self.run_supervisor('claude_command = claude\ncodex_command = codex\n'
+                                     'codex_model = gpt-6.2-sol\n')
+        setup = sup.setup
+        self.assertEqual(setup['routed'], {'claude': False, 'codex': False})
+        self.assertEqual(autopilot.model_how({'cli': 'codex', 'model': 'gpt-6.2-sol', 'effort': 'high'},
+                                             setup, 'external review', 'codex iteration 1'),
+                         'model set by codex_model = gpt-6.2-sol in .ralphex/config, '
+                         'effort codex default (not routed)')
+        self.assertEqual(autopilot.model_how(None, setup, 'code review', 'claude review 0'),
+                         'claude default (not routed)')
+        fallback = {'cli': 'claude', 'model': 'claude-opus-5-5',
+                    'fallback': {'fields': ['model', 'effort']}}
+        routed = dict(setup, routed={'claude': True, 'codex': True})
+        self.assertEqual(autopilot.model_how(fallback, routed, 'implementing tasks', 'task iteration 1'),
+                         'claude default (router fallback)')
+
     def test_a_restart_drops_the_open_prompt_and_its_recommendation(self):
         choice = {'kind': 'choice', 'question': 'Pick', 'options': ['A', 'B'], 'free_text': False}
         self.sup.handle_prompt(dict(choice))
@@ -2301,3 +2449,256 @@ class ExecutionChecks(unittest.TestCase):
             blocked = self.capability(repo, routed, disabled)
             self.assertFalse(blocked['usable'])
             self.assertIn('disabled for routing', blocked['reason'])
+
+
+class CompactBeforeRun(unittest.TestCase):
+    """End of planning: the chat ends its turn, /compact is typed, then the resume line."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state = Path(self.tmp.name) / 'state'
+        self.handoff = Path(self.tmp.name) / 'handoff.md'
+        self.handoff.write_text('flow f1, plan docs/plans/x.md, implement in a new worktree\n')
+        env = {'AUTOPILOT_STATE_DIR': str(self.state), 'AUTOPILOT_CONFIG': '/none',
+               'AUTOPILOT_COMPACT_POLL_S': '0.05', 'CLAUDE_CODE_SESSION_ID': 'chat-1'}
+        patch = unittest.mock.patch.dict(os.environ, env)
+        patch.start()
+        self.addCleanup(patch.stop)
+        for name, value in (('COMPACT_POLL_S', 0.05), ('COMPACT_NO_HOOK_S', 0.2),
+                            ('COMPACT_IDLE_S', 2), ('COMPACT_DONE_S', 2)):
+            p = unittest.mock.patch.object(autopilot, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def request(self, tab):
+        out = []
+        with unittest.mock.patch.object(autopilot, 'own_tab', return_value=tab), \
+                unittest.mock.patch.object(autopilot, 'autopilot_config', return_value={}), \
+                unittest.mock.patch.object(autopilot.subprocess, 'Popen') as popen, \
+                unittest.mock.patch.object(autopilot, 'emit', side_effect=out.append):
+            autopilot.cmd_compact(autopilot.argparse.Namespace(
+                flow='f1', handoff=str(self.handoff), focus=None))
+        return out[0], popen
+
+    def hook(self, event, **data):
+        out = []
+        with unittest.mock.patch('builtins.print', side_effect=out.append):
+            handled = autopilot.compact_hook(event, {'session_id': 'chat-1', **data})
+        return handled, out
+
+    def test_turn_end_then_compact_then_resume(self):
+        res, popen = self.request({'kind': 'tmux', 'handle': '%1', 'bin': 'tmux'})
+        self.assertTrue(res['ok'])
+        self.assertIn('Step 5', res['resume_line'])
+        self.assertEqual(popen.call_args.args[0][2:4], ['_compact', res['request']])
+        typed = []
+
+        def fake_type(argv, timeout=15, cwd=None):
+            typed.append(argv[argv.index('-l') + 1])
+            if typed[-1].startswith('/compact'):
+                # the host compacts and fires SessionStart with the compact source
+                handled, out = self.hook('session-start', source='compact')
+                self.assertTrue(handled)
+                self.assertIn(str(self.handoff), json.loads(out[0])['hookSpecificOutput']
+                              ['additionalContext'])
+            return 0, ''
+
+        handled, _ = self.hook('stop')  # the chat ended its turn
+        self.assertTrue(handled)
+        with unittest.mock.patch.object(autopilot, 'run_quiet', side_effect=fake_type), \
+                unittest.mock.patch.object(autopilot.time, 'sleep'):
+            autopilot.cmd_compact_helper(autopilot.argparse.Namespace(request=res['request']))
+        self.assertEqual(len(typed), 2)
+        self.assertTrue(typed[0].startswith('/compact Keep only what the autopilot run needs: flow f1'))
+        self.assertEqual(typed[1], res['resume_line'])
+        req = json.loads(Path(res['request']).read_text())
+        self.assertEqual((req['status'], req['compacted']), ('done', True))
+        # another chat's turn end or a normal start does nothing
+        self.assertEqual(self.hook('stop'), (False, []))
+        self.assertEqual(self.hook('session-start', source='startup'), (False, []))
+
+    def test_no_turn_end_sends_only_the_resume_line(self):
+        res, _ = self.request({'kind': 'tmux', 'handle': '%1', 'bin': 'tmux'})
+        typed = []
+        with unittest.mock.patch.object(autopilot, 'run_quiet',
+                                        side_effect=lambda a, **k: typed.append(a) or (0, '')), \
+                unittest.mock.patch.object(autopilot, 'COMPACT_IDLE_S', 0.1):
+            autopilot.cmd_compact_helper(autopilot.argparse.Namespace(request=res['request']))
+        self.assertEqual(len(typed), 1)
+        self.assertIn(res['resume_line'], typed[0])
+        self.assertEqual(json.loads(Path(res['request']).read_text())['status'],
+                         'resumed-without-compact')
+
+    def test_skipped_without_a_tab_or_when_off(self):
+        res, popen = self.request(None)
+        self.assertFalse(res['ok'])
+        self.assertIn('cannot be typed into', res['skipped'])
+        popen.assert_not_called()
+        with unittest.mock.patch.dict(os.environ, {'AUTOPILOT_COMPACT': 'off'}):
+            res, _ = self.request({'kind': 'tmux', 'handle': '%1', 'bin': 'tmux'})
+        self.assertIn('mode = off', res['skipped'])
+
+
+class FieldReportFixes(unittest.TestCase):
+    """The problems of a Windows run (ATH-2386): one test each."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def test_custom_codex_provider_skips_the_openai_login_check(self):
+        home = self.root / 'codex'
+        home.mkdir()
+        with unittest.mock.patch.dict(os.environ, {'CODEX_HOME': str(home)}):
+            self.assertIsNone(autopilot.codex_custom_provider())
+            (home / 'config.toml').write_text('model = "x"\nmodel_provider = "conduit"\n\n'
+                                              '[model_providers.conduit]\nname = "Conduit"\n')
+            self.assertEqual(autopilot.codex_custom_provider(), 'conduit')
+            (home / 'config.toml').write_text('model_provider = "openai"\n')
+            self.assertIsNone(autopilot.codex_custom_provider())
+            # a provider only inside a profile table is not the default one
+            (home / 'config.toml').write_text('[profiles.x]\nmodel_provider = "conduit"\n')
+            self.assertIsNone(autopilot.codex_custom_provider())
+
+    def test_wrapped_findings_are_joined_and_none_is_lost(self):
+        sdir = self.root / 's'
+        (sdir / 'inbox').mkdir(parents=True)
+        autopilot.write_json(sdir / 'session.json', {
+            'kind': 'plan', 'target': 'x', 'repo': str(self.root), 'argv': ['ralphex'],
+            'policy': autopilot.load_policy()})
+        sup = autopilot.Supervisor(sdir)
+        self.addCleanup(sup.log.close)
+        for raw in ['plan review findings:',
+                    '  1. MAJOR: Task 2 - the migration step runs before the',
+                    'schema exists, so the seed fails on an empty database',
+                    '  2. MINOR: Overview - wording',
+                    'plan review skipped']:
+            sup.scan_line(autopilot.clean_line(raw), raw)
+        self.assertEqual(sup.state['review_findings'], [
+            {'n': 1, 'severity': 'MAJOR', 'text': 'Task 2 - the migration step runs before the '
+             'schema exists, so the seed fails on an empty database'},
+            {'n': 2, 'severity': 'MINOR', 'text': 'Overview - wording'}])
+        self.assertEqual(sup.state['events'][-1]['kind'], 'plan-review')
+
+    def test_hook_text_is_short_and_quiet_between_two_watches(self):
+        self.assertEqual(autopilot.short_text('Implement step 3\n' + 'x' * 4000), 'Implement step 3')
+        self.assertEqual(len(autopilot.short_text('y' * 500)), 80)
+        sdir = self.root / 'state/sessions/20261119-000000-run-aaaa'
+        sdir.mkdir(parents=True)
+        autopilot.write_json(sdir / 'session.json', {'kind': 'run', 'target': 'z' * 4000,
+                                                     'owner': 'c1', 'repo': str(self.root)})
+        autopilot.write_json(sdir / 'state.json', {'status': 'running', 'pid': os.getpid(),
+                                                   'seq': 0, 'events': []})
+        autopilot.write_json(sdir / 'watcher.json', {'pid': None, 'ended': time.time()})
+        with unittest.mock.patch.dict(os.environ, {'AUTOPILOT_STATE_DIR': str(self.root / 'state')}):
+            w = autopilot.watch_status(sdir)
+            self.assertEqual((w['watched'], w['between_watches']), (False, True))
+            self.assertLess(len(autopilot.describe_run(w, 'c1')), 300)
+            autopilot.write_json(sdir / 'watcher.json', {'pid': None, 'ended': time.time() - 999})
+            self.assertFalse(autopilot.watch_status(sdir)['between_watches'])
+
+    def test_a_state_file_being_replaced_is_read_again(self):
+        path = self.root / 'state.json'
+        path.write_text('{"seq": 7')  # half written
+        calls = []
+
+        def later(*a):
+            calls.append(1)
+            path.write_text('{"seq": 7}')
+        with unittest.mock.patch.object(autopilot.time, 'sleep', side_effect=later):
+            self.assertEqual(autopilot.read_json(path, {}), {'seq': 7})
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(autopilot.read_json(self.root / 'missing.json', 'd'), 'd')
+
+    def test_heartbeat_line_for_a_long_review(self):
+        line = autopilot.event_line({'kind': 'heartbeat', 'phase': 'code review',
+                                     'section': 'claude review 0: all findings', 'minutes': 90,
+                                     'output_min': 25, 'active_min': 0})
+        self.assertEqual(line, '… Code review: claude review 0: all findings still running '
+                               '(90 min) · last output 25 min ago · agent active now')
+        self.assertNotIn('heartbeat', autopilot.WAIT_QUIET)
+
+    def test_heartbeat_and_transcript_activity_in_the_supervisor(self):
+        repo = self.root / 'repo'
+        repo.mkdir()
+        sdir = self.root / 'run'
+        (sdir / 'inbox').mkdir(parents=True)
+        autopilot.write_json(sdir / 'session.json', {
+            'kind': 'run', 'target': 'p.md', 'repo': str(repo), 'argv': ['ralphex', 'p.md'],
+            'policy': autopilot.load_policy()})
+        claude = self.root / 'claude'
+        with unittest.mock.patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(claude),
+                                                   'CODEX_HOME': str(self.root / 'none')}):
+            sup = autopilot.Supervisor(sdir)
+            self.addCleanup(sup.log.close)
+            sup.state['status'] = 'running'
+            sup.scan_line('--- claude review 0: all findings ---')
+            sup.scan_line('agrouter: selection: {"cli":"claude","model":"m","effort":"high"}')
+            sup.step['at'] -= 4000
+            sup.last_output -= 3000
+            sup.last_news = autopilot.now() - 4000
+            transcript = claude / 'projects' / re.sub(r'[^A-Za-z0-9]', '-', str(repo.resolve()))
+            transcript.mkdir(parents=True)
+            (transcript / 's.jsonl').write_text('{}')
+            sup.track_progress()
+        kinds = [e['kind'] for e in sup.state['events']]
+        self.assertIn('heartbeat', kinds)
+        self.assertNotIn('stalled', kinds)  # the transcript shows the agent works
+        beat = [e for e in sup.state['events'] if e['kind'] == 'heartbeat'][0]
+        self.assertEqual((beat['minutes'], beat['active_min']), (67, 0))
+
+
+class RunNames(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name) / 'repo'
+        self.repo.mkdir()
+        git(self.repo, 'init', '-q', '-b', 'master')
+        (self.repo / '.gitignore').write_text('docs/plans/\n')
+        (self.repo / 'README.md').write_text('x')
+        git(self.repo, 'add', '.')
+        git(self.repo, 'commit', '-qm', 'init')
+        self.plan = self.repo / 'docs/plans/20261119-user-service.md'
+        self.plan.parent.mkdir(parents=True)
+        self.plan.write_text('# Plan: Add the user service\n### Task 1: a\n- [ ] a\n')
+
+    def config(self, **values):
+        return unittest.mock.patch.object(autopilot, 'autopilot_config',
+                                          side_effect=lambda section: values if section == 'worktree' else {})
+
+    def test_default_names_follow_the_plan_file(self):
+        with self.config():
+            n = autopilot.run_names(str(self.repo), self.plan)
+        self.assertEqual((n['branch'], n['needs'], n['custom']), ('user-service', [], False))
+
+    def test_convention_with_a_ticket_and_the_plan_title(self):
+        with self.config(branch='feature/{ticket}/{slug}', path='{parent}/wt/{ticket}-{summary}'):
+            missing = autopilot.run_names(str(self.repo), self.plan)
+            self.assertEqual((missing['branch'], missing['needs']), ('user-service', ['ticket']))
+            n = autopilot.run_names(str(self.repo), self.plan, ticket='ATH-2386')
+            place = autopilot.implementation_place(str(self.repo), {}, self.plan, ticket='ATH-2386')
+        self.assertEqual(n['branch'], 'feature/ATH-2386/user-service')
+        self.assertEqual(Path(n['path']).name, 'ATH-2386-Add-the-user-service')
+        self.assertEqual(place['options'][0]['run_args'],
+                         ['--new-worktree', '--branch', 'feature/ATH-2386/user-service',
+                          '--worktree-path', n['path']])
+        # a ticket in the current branch name is found without asking
+        git(self.repo, 'checkout', '-qb', 'ATH-77-x')
+        with self.config(branch='feature/{ticket}/{slug}'):
+            self.assertEqual(autopilot.run_names(str(self.repo), self.plan)['ticket'], 'ATH-77')
+
+    def test_ignored_plan_is_copied_without_a_commit_and_reported(self):
+        place = autopilot.implementation_place(str(self.repo), {}, self.plan)
+        self.assertTrue(place['plan_ignored'])
+        self.assertIn('completed/', place['warnings'][0])
+        env = {'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@t',
+               'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@t'}
+        with unittest.mock.patch.dict(os.environ, env), self.config():
+            wt = autopilot.prepare_worktree(str(self.repo), self.plan, [], baseline={})
+        self.assertEqual(wt['ignored'], ['docs/plans/20261119-user-service.md'])
+        self.assertTrue(Path(wt['plan']).exists())
+        self.assertEqual(wt['moved'], [])
+        self.assertTrue(self.plan.exists())  # not committed there, so it stays here too
