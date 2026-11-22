@@ -134,8 +134,9 @@ re-post the task list. A sample run:
 model and effort and who chose them: "chosen by agrouter", "set by
 <key> = <spec> in <config file>" (or a run flag), or the CLI default. When
 the model and the effort have different sources, the line names both.
-The runner prints the Codex banner only on the first Codex call, so for
-later Codex steps autopilot reads the choice from agrouter's log. A task
+Autopilot takes the model and effort of every step from agrouter's log
+(`<log_dir>/agrouter.log`). The runner's output is only a fallback: it
+hides agrouter's line for Codex and prints the Codex banner once. A task
 start line also says what the task is going to do, and a done line with its time, models, commit
 and what it did. The plan file is not counted in the changed files: the
 runner commits its ticked boxes with the code. When agrouter could not

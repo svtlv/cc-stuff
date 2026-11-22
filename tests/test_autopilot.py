@@ -2267,8 +2267,11 @@ class SupervisorUnits(unittest.TestCase):
         sup.scan_line('agrouter: selection: {"cli":"claude","model":"claude-opus-5-5","effort":"xhigh"}')
         sup.scan_line('--- claude review 0: all findings ---')
         sup.scan_line('agrouter: selection: {"cli":"claude","model":"claude-sonnet-5-5","effort":"high"}')
-        # the first codex call shows the banner
+        # the first codex call shows the banner, but agrouter's log names the choice
         sup.scan_line('--- codex iteration 1 ---')
+        with open(log, 'a') as fh:
+            fh.write('2026-11-19T16:25:26Z pid=3 agrouter: selection: {"cli":"codex",'
+                     '"model":"gpt-6.2-sol","effort":"max"}\n')
         sup.scan_line('model: gpt-6.2-sol')
         sup.scan_line('reasoning effort: xhigh')
         # later codex calls show nothing: the choice is only in agrouter's log
@@ -2288,6 +2291,8 @@ class SupervisorUnits(unittest.TestCase):
         self.assertEqual([p['how'] for p in phases], [
             'model chosen by agrouter, effort set by review_model = :high in .ralphex/config',
             'chosen by agrouter', 'chosen by agrouter', 'not reported'])
+        self.assertEqual(phases[1]['model'], {'cli': 'codex', 'model': 'gpt-6.2-sol', 'effort': 'max'})
+        self.assertEqual(phases[1]['via'], 'agrouter log')
         self.assertEqual(phases[2]['model'], {'cli': 'codex', 'model': 'gpt-6.2-sol', 'effort': 'high'})
         self.assertEqual(phases[2]['via'], 'agrouter log')
         lines = [autopilot.event_line(p) for p in phases]
@@ -2298,6 +2303,32 @@ class SupervisorUnits(unittest.TestCase):
         self.assertIn('set by --task-model=opus:xhigh on the run', autopilot.event_line(task))
         self.assertEqual([s['how'] for s in sup.state['steps']][:2],
                          ['set by --task-model=opus:xhigh on the run', phases[0]['how']])
+
+    def test_agrouter_log_is_the_model_source_for_every_step(self):
+        sup, repo = self.run_supervisor('claude_command = agrouter\n')
+        log = repo / '.agrouter/logs/agrouter.log'
+        log.parent.mkdir(parents=True)
+        log.write_text('')
+        sup.scan_line('--- claude review 0: all findings ---')
+        with open(log, 'a') as fh:  # the log and the output disagree: the log wins
+            fh.write('2026-11-22T08:00:00Z pid=1 agrouter: selection: {"cli":"claude",'
+                     '"model":"claude-opus-5-5","effort":"xhigh"}\n'
+                     '2026-11-22T08:00:01Z pid=2 agrouter: selection: {"cli":"codex",'
+                     '"model":"gpt-6.2-sol","effort":"high"}\n'
+                     '2026-11-22T08:00:02Z pid=3 agrouter: selection: {"cli":"claude",')  # half
+        sup.scan_line('agrouter: selection: {"cli":"claude","model":"claude-sonnet-5-5","effort":"high"}')
+        phase = [e for e in sup.state['events'] if e['kind'] == 'phase-start'][0]
+        self.assertEqual((phase['model'], phase['via']),
+                         ({'cli': 'claude', 'model': 'claude-opus-5-5', 'effort': 'xhigh'},
+                          'agrouter log'))
+        # without a log the output line is used
+        sup.router_mark = None
+        sup.scan_line('--- claude review 1: critical/major ---')
+        sup.router_mark = None
+        sup.scan_line('agrouter: selection: {"cli":"claude","model":"claude-sonnet-5-5","effort":"high"}')
+        phase = [e for e in sup.state['events'] if e['kind'] == 'phase-start'][1]
+        self.assertEqual(phase['model']['model'], 'claude-sonnet-5-5')
+        self.assertNotIn('via', phase)
 
     def test_pinned_codex_review_and_unrouted_claude_say_so(self):
         sup, _ = self.run_supervisor('claude_command = claude\ncodex_command = codex\n'
@@ -2657,7 +2688,6 @@ class RunNames(unittest.TestCase):
         self.repo = Path(self.tmp.name) / 'repo'
         self.repo.mkdir()
         git(self.repo, 'init', '-q', '-b', 'master')
-        (self.repo / '.gitignore').write_text('docs/plans/\n')
         (self.repo / 'README.md').write_text('x')
         git(self.repo, 'add', '.')
         git(self.repo, 'commit', '-qm', 'init')
@@ -2690,15 +2720,19 @@ class RunNames(unittest.TestCase):
         with self.config(branch='feature/{ticket}/{slug}'):
             self.assertEqual(autopilot.run_names(str(self.repo), self.plan)['ticket'], 'ATH-77')
 
-    def test_ignored_plan_is_copied_without_a_commit_and_reported(self):
-        place = autopilot.implementation_place(str(self.repo), {}, self.plan)
-        self.assertTrue(place['plan_ignored'])
-        self.assertIn('completed/', place['warnings'][0])
-        env = {'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@t',
-               'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@t'}
-        with unittest.mock.patch.dict(os.environ, env), self.config():
-            wt = autopilot.prepare_worktree(str(self.repo), self.plan, [], baseline={})
-        self.assertEqual(wt['ignored'], ['docs/plans/20261119-user-service.md'])
-        self.assertTrue(Path(wt['plan']).exists())
-        self.assertEqual(wt['moved'], [])
-        self.assertTrue(self.plan.exists())  # not committed there, so it stays here too
+    def test_a_plan_git_ignores_stops_the_run_with_a_clear_message(self):
+        (self.repo / '.gitignore').write_text('docs/plans/\n')
+        cwd = os.getcwd()
+        self.addCleanup(os.chdir, cwd)
+        os.chdir(self.repo)
+        args = autopilot.argparse.Namespace(plan='docs/plans/20261119-user-service.md',
+                                            cli_args=[], force=False, max_restarts=1, flow='f',
+                                            new_worktree=True, worktree_path=None, branch=None)
+        with unittest.mock.patch.object(autopilot, 'require_tools'), \
+                unittest.mock.patch.object(autopilot, 'start_session') as start, \
+                unittest.mock.patch.object(autopilot, 'die', side_effect=SystemExit) as die:
+            with self.assertRaises(SystemExit):
+                autopilot.cmd_run(args)
+        self.assertIn('remove its folder from .gitignore', die.call_args.args[0])
+        start.assert_not_called()
+        self.assertFalse((self.repo.parent / 'workspaces').exists())  # no worktree was made

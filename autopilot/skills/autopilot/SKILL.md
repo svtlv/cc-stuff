@@ -129,8 +129,7 @@ proposed branch and folder, after `[worktree] branch` and `path` in
 `.autopilot/config`. Show both in the question. When `names.needs` lists
 `ticket`, ask for it in the same question; without a reply the run uses
 the plan name and logs that. On a new ticket or other names, run `place`
-again with them. Post every line of `warnings` (for example a plan that
-git ignores). Ask one question
+again with them. Ask one question
 in plain text, recommending **Implement in the recommended place** (or
 Revise, when the explanation surfaced a concrete problem), with the
 deadline as a clock time ("Asking" in `references/response-times.md`).

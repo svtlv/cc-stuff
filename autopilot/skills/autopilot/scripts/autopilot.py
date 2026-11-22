@@ -2080,11 +2080,6 @@ def start_session(kind, target, cli_args, max_restarts, flow=None, extra=None):
                             'files back as committed'
                             + (f"; restore problems: {'; '.join(wt['restore_problems'])}"
                                if wt.get('restore_problems') else ''))
-    if wt.get('ignored'):
-        log_decision(sdir, kind='decision', by='autopilot',
-                     text=f"copied without a commit (git ignores them): {', '.join(wt['ignored'][:8])}",
-                     reason='the run reads the plan from the worktree folder; it is not on the '
-                            'branch, and the runner cannot archive it to completed/ at the end')
     if wt.get('kept_here'):
         log_decision(sdir, kind='decision', by='autopilot',
                      text=f"copied but kept in the source checkout: {', '.join(wt['kept_here'][:8])}",
@@ -2128,6 +2123,10 @@ def cmd_run(args):
         die('the runner cannot use this plan: ' + '; '.join(verdict['problems']) +
             '. Redesign it with the autopilot-plan skill (--redesign), or pass --force')
     repo = git_root() or '.'
+    if run_quiet(['git', 'check-ignore', '-q', '--', str(plan.resolve())], cwd=repo)[0] == 0:
+        # a setup error in the repository: the run commits its plan, git refuses an ignored one
+        die(f'git ignores the plan {plan}: remove its folder from .gitignore. The run commits '
+            'the plan and archives it to completed/ at the end')
     cli_args = list(args.cli_args)
     if getattr(args, 'branch', None) and not any(a == '--branch' or a.startswith('--branch=') for a in cli_args):
         cli_args += ['--branch', args.branch]  # the runner's flag: the run branch's name
@@ -2413,7 +2412,7 @@ class Supervisor:
             if self.step and self.step['phase'] != 'implementing tasks':
                 self.safe_point(self.step['section'])  # a review round ended
             self.step = {'section': label, 'phase': phase, 'at': now(), 'model': None}
-            self.router_mark = self.router_log_mark() if self.codex_step(label) else None
+            self.router_mark = self.router_log_mark()  # agrouter logs every selection there
             if phase == 'external review' and self.state.get('skip_external'):
                 self.break_external_review()
             return
@@ -2491,7 +2490,7 @@ class Supervisor:
                     return False
                 return True
             self.sel_lines = None
-            self.use_selection(sel)
+            self.take_selection(sel)
             return True
         if line.rstrip() == 'agrouter: selection:':
             self.sel_lines = []
@@ -2502,9 +2501,11 @@ class Supervisor:
                 sel = json.loads(m.group(1))
             except ValueError:
                 return True
-            self.use_selection(sel)
+            self.take_selection(sel)
             return True
         m = BANNER_RE.match(line)
+        if m and m.group(1) != 'model' and self.step and self.use_logged_selection():
+            return True  # agrouter's log names what it chose: that beats the banner
         if m:
             model = self.state.setdefault('model', {}) or {}
             if m.group(1) == 'model':
@@ -2540,31 +2541,50 @@ class Supervisor:
         except OSError:
             return (path, 0)
 
-    def selection_from_log(self):
-        """The last codex selection agrouter logged since this step started, or None.
+    def take_selection(self, sel):
+        """A selection line in the runner's output: agrouter's log first, this line if not."""
+        if not (self.step and self.use_logged_selection()):
+            self.use_selection(sel)
 
-        The runner shows the Codex banner (model, effort) only on its first Codex call and
-        hides agrouter's stderr for Codex, so later Codex steps report nothing. agrouter still
-        appends every selection to its console log.
+    def use_logged_selection(self):
+        """Take the step's model from agrouter's log; True when the log had a new selection."""
+        sel = self.selection_from_log()
+        if not sel:
+            return False
+        self.step['model_via'] = 'agrouter log'
+        self.use_selection(sel)  # fills the step's model and announces it
+        return True
+
+    def selection_from_log(self):
+        """The last selection agrouter logged since the last read in this step, or None.
+
+        agrouter appends every selection to its console log (<log_dir>/agrouter.log), also when
+        the runner hides its stderr (the runner never shows agrouter's line for Codex and
+        prints the Codex banner only once). So the log is the model source for every step;
+        the runner's output is the fallback when there is no log. Only whole lines are read,
+        and the mark moves past them, so a second call in the same step sees only new ones.
         """
-        if not self.router_mark:
+        if not self.router_mark or not self.step:
             return None
+        want = 'codex' if self.codex_step(self.step['section']) else 'claude'
         path, start = self.router_mark
         try:
             with open(path, 'rb') as fh:
                 fh.seek(start)
-                text = fh.read(256 * 1024).decode('utf-8', 'replace')
+                data = fh.read(256 * 1024)
         except OSError:
             return None
+        whole = data[:data.rfind(b'\n') + 1]
+        self.router_mark = (path, start + len(whole))
         found = None
-        for line in text.splitlines():
+        for line in whole.decode('utf-8', 'replace').splitlines():
             m = re.search(r'agrouter: selection: (\{.*\})\s*$', line)
             if m:
                 try:
                     sel = json.loads(m.group(1))
                 except ValueError:
                     continue
-                if sel.get('cli') in (None, 'codex'):
+                if sel.get('cli') in (None, want):
                     found = sel
         return found
 
@@ -3002,13 +3022,8 @@ class Supervisor:
         step = self.step
         if not step or step.get('announced') or not (step['model'] or timed_out):
             return
-        if not step['model'] and self.router_mark:
-            sel = self.selection_from_log()
-            if sel:
-                self.router_mark = None
-                step['model_via'] = 'agrouter log'
-                self.use_selection(sel)  # fills the step's model and announces it
-                return
+        if not step['model'] and self.router_mark and self.use_logged_selection():
+            return
         step['announced'] = True
         model = step['model']
         how = model_how(model, self.setup, step['phase'], step['section'], step.get('selected'))
@@ -4665,7 +4680,6 @@ def implementation_place(repo, cfg=None, plan=None, baseline=None, ticket=None, 
             plan_rel = None
     dirty = [path for path in porcelain_paths(repo) if path != plan_rel]
     use_worktree = str(cfg.get('use_worktree', '')).lower() == 'true'
-    plan_ignored = bool(plan_rel and ignored_paths(repo, [plan_rel]))
     checkout = 'worktree' if linked else 'main checkout'
     here_text = (f'this worktree, branch {branch}' if linked and not on_default
                  else f'this checkout, branch {branch}' if not on_default
@@ -4723,11 +4737,7 @@ def implementation_place(repo, cfg=None, plan=None, baseline=None, ticket=None, 
     return {'checkout': checkout, 'branch': branch or None, 'default_branch': default or None,
             'on_default': on_default, 'dirty': dirty, 'operation': operation,
             'use_worktree': use_worktree, 'recommended': recommended, 'why': why,
-            'plan_ignored': plan_ignored, 'names': names,
-            'warnings': ([f'git ignores the plan {plan_rel}: it is copied to a new worktree but '
-                          'not committed, and the runner cannot archive it to completed/ at the '
-                          'end. Remove its folder from .gitignore to keep plans in git']
-                         if plan_ignored else []),
+            'names': names,
             'options': [o for o in (worktree, here) if o['option'] == recommended]
             + [o for o in (worktree, here) if o['option'] != recommended]}
 
@@ -4834,14 +4844,6 @@ def worktree_of(repo, branch):
     return None
 
 
-def ignored_paths(repo, paths):
-    """The paths git ignores in repo (tracked files never count as ignored)."""
-    if not paths:
-        return []
-    code, out = run_quiet(['git', 'check-ignore', '--', *paths], cwd=repo)
-    return [line.strip() for line in out.splitlines() if line.strip()] if code == 0 else []
-
-
 def restore_paths(repo, paths):
     """Give paths back their HEAD state in repo: tracked ones checked out, new ones removed."""
     repo = Path(repo)
@@ -4890,7 +4892,7 @@ def prepare_worktree(repo, plan, cli_args, path=None, baseline=None):
     if existing and Path(existing).resolve() != repo.resolve():
         return {'path': existing, 'branch': branch, 'base': base, 'plan': str(Path(existing) / rel),
                 'reused': True, 'copied': [], 'removed': [], 'moved': [], 'kept_here': [],
-                'restore_problems': [], 'ignored': []}
+                'restore_problems': []}
     if existing:
         die(f'{branch} is checked out in this folder: run here instead of in a new worktree')
     target = Path(path) if path else sibling_path(repo, branch)
@@ -4931,28 +4933,23 @@ def prepare_worktree(repo, plan, cli_args, path=None, baseline=None):
                 dst.unlink()
             shutil.copy2(src, dst, follow_symlinks=False)
             copied.append(name)
-    # an ignored file (a plans folder in .gitignore) is copied but cannot be committed: git
-    # add refuses it. The run still reads it; the runner cannot archive it later.
-    ignored = ignored_paths(target, copied)
-    staged = [p for p in copied if p not in ignored]
-    if staged or removed:
-        if staged:
-            code, out = run_quiet(['git', 'add', '--', *staged], cwd=target)
+    if copied or removed:
+        if copied:
+            code, out = run_quiet(['git', 'add', '--', *copied], cwd=target)
             if code != 0:
-                die(f'could not stage {", ".join(staged[:5])} in {target}: {out[-300:]}')
-        extra = [p for p in staged + removed if p != plan_rel and p not in REPO_CONFIGS
+                die(f'could not stage {", ".join(copied[:5])} in {target}: {out[-300:]}')
+        extra = [p for p in copied + removed if p != plan_rel and p not in REPO_CONFIGS
                  and not p.startswith('.ralphex/scripts/')]
         msg = f'add plan and flow changes: {branch}' if extra else f'add plan: {branch}'
         code, out = run_quiet(['git', 'commit', '-m', msg], cwd=target, timeout=60)
         if code != 0:
             die(f'could not commit the plan in {target}: {out[-300:]}')
     # only after the commit holds them: give this checkout its files back as in HEAD
-    moved = [p for p in move if (p in copied and p not in ignored) or p in removed]
+    moved = [p for p in move if p in copied or p in removed]
     problems = restore_paths(repo, moved) if moved else []
     return {'path': str(target), 'branch': branch, 'base': base, 'plan': str(target / rel),
             'reused': False, 'copied': copied, 'removed': removed, 'moved': moved,
-            'kept_here': [p for p in keep if p in copied], 'restore_problems': problems,
-            'ignored': ignored}
+            'kept_here': [p for p in keep if p in copied], 'restore_problems': problems}
 
 
 def cmd_place(args):
