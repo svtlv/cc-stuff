@@ -1,6 +1,6 @@
 {
   "name": "autopilot",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Plan and implement tasks autonomously: interactive planning with the user, a plan explanation, then a supervised implementation run with automatic restarts and live status, plus guided setup of the plan runner and model router.",
   "author": {
     "name": "svtlv",

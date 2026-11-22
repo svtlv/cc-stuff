@@ -1780,6 +1780,9 @@ class ImplementationPlace(unittest.TestCase):
         # from a linked worktree the layout still hangs off the main checkout's folder
         self.assertEqual(autopilot.sibling_path(str(wt), 'feature/x').resolve(),
                          (self.repo.parent / 'workspaces/repo/Feature-x').resolve())
+        self.assertEqual(autopilot.sibling_path(str(wt), 'feature/x',
+                                                {'summary': 'Add the cache'}).resolve(),
+                         (self.repo.parent / 'workspaces/repo/Add-the-cache').resolve())
         with unittest.mock.patch.object(autopilot, 'autopilot_config',
                                         return_value={'path': '{parent}/wt/{repo}-{branch}'}):
             self.assertEqual(autopilot.sibling_path(str(self.repo), 'add-cache').resolve(),
@@ -2699,26 +2702,48 @@ class RunNames(unittest.TestCase):
         return unittest.mock.patch.object(autopilot, 'autopilot_config',
                                           side_effect=lambda section: values if section == 'worktree' else {})
 
-    def test_default_names_follow_the_plan_file(self):
+    def test_default_names_follow_the_convention(self):
         with self.config():
             n = autopilot.run_names(str(self.repo), self.plan)
-        self.assertEqual((n['branch'], n['needs'], n['custom']), ('user-service', [], False))
-
-    def test_convention_with_a_ticket_and_the_plan_title(self):
-        with self.config(branch='feature/{ticket}/{slug}', path='{parent}/wt/{ticket}-{summary}'):
-            missing = autopilot.run_names(str(self.repo), self.plan)
-            self.assertEqual((missing['branch'], missing['needs']), ('user-service', ['ticket']))
-            n = autopilot.run_names(str(self.repo), self.plan, ticket='ATH-2386')
-            place = autopilot.implementation_place(str(self.repo), {}, self.plan, ticket='ATH-2386')
-        self.assertEqual(n['branch'], 'feature/ATH-2386/user-service')
-        self.assertEqual(Path(n['path']).name, 'ATH-2386-Add-the-user-service')
+            place = autopilot.implementation_place(str(self.repo), {}, self.plan)
+        self.assertEqual((n['branch'], n['type'], n['note']), ('feature/user-service', 'feature', None))
+        self.assertEqual(Path(n['path']).name, 'Add-the-user-service')
         self.assertEqual(place['options'][0]['run_args'],
-                         ['--new-worktree', '--branch', 'feature/ATH-2386/user-service',
+                         ['--new-worktree', '--branch', 'feature/user-service',
                           '--worktree-path', n['path']])
-        # a ticket in the current branch name is found without asking
-        git(self.repo, 'checkout', '-qb', 'ATH-77-x')
+        self.assertNotIn('ticket', place['names'])
+
+    def test_a_plan_that_names_a_fix_gets_the_fix_type(self):
+        plan = self.repo / 'docs/plans/20261119-login-timeout.md'
+        plan.write_text('# Plan: Fix the login timeout\n### Task 1: a\n- [ ] a\n')
+        with self.config():
+            self.assertEqual(autopilot.run_names(str(self.repo), plan)['branch'],
+                             'bugfix/login-timeout')
+        self.assertEqual(autopilot.change_type('prefix-cache', 'Add a prefix cache'), 'feature')
+
+    def test_config_pattern_and_user_branch_win(self):
+        with self.config(branch='feature/{slug}', path='{parent}/wt/{summary}'):
+            n = autopilot.run_names(str(self.repo), self.plan)
+            asked = autopilot.run_names(str(self.repo), self.plan, branch='my/own branch')
+        self.assertEqual(n['branch'], 'feature/user-service')
+        self.assertEqual(Path(n['path']).name, 'Add-the-user-service')
+        self.assertEqual(asked['branch'], 'my/own-branch')
+
+    def test_an_old_ticket_pattern_falls_back_without_asking(self):
         with self.config(branch='feature/{ticket}/{slug}'):
-            self.assertEqual(autopilot.run_names(str(self.repo), self.plan)['ticket'], 'ATH-77')
+            n = autopilot.run_names(str(self.repo), self.plan)
+        self.assertEqual(n['branch'], 'feature/user-service')
+        self.assertIn('{ticket}', n['note'])
+
+    def test_pr_title_follows_the_convention(self):
+        with self.config():
+            self.assertEqual(autopilot.pr_title(self.plan, 'feature/user-service'),
+                             'Add the user service')
+        with unittest.mock.patch.object(autopilot, 'autopilot_config',
+                                        side_effect=lambda section: {'pr_title': '[{branch}] {summary}'}
+                                        if section == 'worktree' else {}):
+            self.assertEqual(autopilot.pr_title(self.plan, 'feature/user-service'),
+                             '[feature/user-service] Add the user service')
 
     def test_a_plan_git_ignores_stops_the_run_with_a_clear_message(self):
         (self.repo / '.gitignore').write_text('docs/plans/\n')

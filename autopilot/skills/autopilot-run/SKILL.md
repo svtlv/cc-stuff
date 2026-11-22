@@ -4,7 +4,7 @@ description: This skill should be used when the user runs "/autopilot-run" or "$
 argument-hint: "<plan file> [-- extra runner flags such as --tasks-only]"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, Agent, CronCreate, CronDelete
 metadata:
-  version: "0.8.0"
+  version: "0.9.0"
 ---
 
 # Autopilot Run
@@ -83,7 +83,7 @@ repository root when setup ran in between).
 | `cli_config.spec_problems` not empty | The phase specs would send the wrong executor's models. Recommend starting with `-- --plan-model=: --task-model=: --review-model=:` (this run only) and fixing `.ralphex/config` later; `preflight` response time. |
 | `active_sessions` has a live `run` for this plan | Attach to it: skip Step 3 and go to Step 4 with that session. |
 | `reviews.code_review`: tool `codex`, not usable | The driver skips the external review for this run on its own; say why in one line (from `reason`) and how to fix it. |
-| Where the run works | Run `AP place --plan <path>` and use the recommended option's `run_args` ("Where the Run Works" in `../autopilot/SKILL.md`): a new worktree in `<parent>/workspaces/<repo>/<Name>` when the plan is on the default branch in the main checkout, here when this is already a worktree or a feature branch. Uncommitted files other than the plan block "here" on the default branch; the worktree leaves them untouched. Never stash or discard them. When the user passed `--worktree` and `place` shows it is not usable, say why and offer the recommended place. `recommended: null`: show `why` and stop until the user fixes it. |
+| Where the run works | Run `AP place --plan <path>` and use the recommended option's `run_args` ("Where the Run Works" in `../autopilot/SKILL.md`): a new worktree in `<parent>/workspaces/<repo>/<Summary>` when the plan is on the default branch in the main checkout, here when this is already a worktree or a feature branch. Uncommitted files other than the plan block "here" on the default branch; the worktree leaves them untouched. Never stash or discard them. When the user passed `--worktree` and `place` shows it is not usable, say why and offer the recommended place. `recommended: null`: show `why` and stop until the user fixes it. |
 
 State what will run in one short table: plan, where (`place`: new
 worktree, this worktree or this checkout), branch (current or the one the

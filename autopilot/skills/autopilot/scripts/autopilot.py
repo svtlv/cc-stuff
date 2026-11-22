@@ -705,13 +705,16 @@ def autopilot_template():
              '', '[worktree]',
              '# path: where a new worktree for a run goes (the workspaces layout by default).',
              '#   {parent} the folder that holds this repository, {repo} its name,',
-             '#   {branch} the run branch, {Name} the branch with a capital first letter',
-             '# path = {parent}/workspaces/{repo}/{Name}',
-             '# branch: the run branch name. {slug} the plan file name without its date,',
-             '#   {ticket} a ticket id (ABC-123: given, or found in the current branch or the',
-             '#   plan), {summary} the plan title. path knows {slug}, {ticket}, {summary} too.',
-             '#   Example: branch = feature/{ticket}/{slug}, path = {parent}/wt/{ticket}-{summary}',
-             '# branch = {slug}',
+             '#   {branch} the run branch, {Name} the branch with a capital first letter,',
+             '#   {summary} the plan title (else {Name})',
+             '# path = {parent}/workspaces/{repo}/{summary}',
+             '# branch: the run branch name. {type} feature, or bugfix when the plan names a fix,',
+             '#   {slug} the plan file name without its date, {summary} the plan title.',
+             '#   path knows {type}, {slug} and {summary} too. A branch the user names wins.',
+             '# branch = {type}/{slug}',
+             '# pr_title: the pull request title. {type}, {summary} the plan title, {slug},',
+             '#   {branch}. A title the user names wins.',
+             '# pr_title = {summary}',
              '', '[timeouts]',
              '# Response time per decision: 90s, 10m, 1h, 1h30m or never. After it the',
              '# recommended answer is taken and logged. <key>.remind sets a reminder before it.']
@@ -4649,7 +4652,8 @@ def session_changes(repo, baseline):
     return {'move': move, 'keep': keep, 'state': now_}
 
 
-def implementation_place(repo, cfg=None, plan=None, baseline=None, ticket=None, summary=None):
+def implementation_place(repo, cfg=None, plan=None, baseline=None, branch_name=None,
+                         summary=None):
     """Where the implementation run should work, and the recommended choice for this checkout.
 
     The runner can make a worktree only from the default branch, and a run on a feature branch
@@ -4684,7 +4688,7 @@ def implementation_place(repo, cfg=None, plan=None, baseline=None, ticket=None, 
     here_text = (f'this worktree, branch {branch}' if linked and not on_default
                  else f'this checkout, branch {branch}' if not on_default
                  else f'a new branch in this {"worktree" if linked else "checkout"}')
-    names = run_names(repo, plan, ticket, summary) if plan else None
+    names = run_names(repo, plan, branch_name, summary) if plan else None
     new_path = names['path'] if names else str(sibling_path(repo, '<plan branch>'))
     name_args = ['--branch', names['branch']] if names and names['branch'] != names['slug'] else []
     worktree = {'option': 'worktree', 'usable': True, 'reason': None, 'path': new_path,
@@ -4745,16 +4749,17 @@ def implementation_place(repo, cfg=None, plan=None, baseline=None, ticket=None, 
 REPO_CONFIGS = ('.ralphex/config', '.agrouter/config', '.autopilot/config')
 
 
-WORKTREE_PATH = '{parent}/workspaces/{repo}/{Name}'
+WORKTREE_PATH = '{parent}/workspaces/{repo}/{summary}'
 
 
 def sibling_path(repo, branch, names=None):
-    """Folder for a new worktree, in the workspaces layout: <parent>/workspaces/<repo>/<Name>.
+    """Folder for a new worktree, in the workspaces layout: <parent>/workspaces/<repo>/<summary>.
 
     <parent> is the folder that holds the main checkout (also when repo is a linked worktree),
-    <Name> is the branch with a capital first letter ("add-cache" -> "Add-cache"). The
+    <summary> is the plan title ("Add the cache" -> "Add-the-cache"); without one it is <Name>,
+    the branch with a capital first letter ("add-cache" -> "Add-cache"). The
     [worktree] path key in the autopilot config changes the pattern; it knows {parent},
-    {repo}, {branch} and {Name}.
+    {repo}, {branch}, {Name}, {type}, {slug} and {summary}.
     """
     code, common = run_quiet(['git', 'rev-parse', '--path-format=absolute', '--git-common-dir'],
                              cwd=repo)
@@ -4763,22 +4768,25 @@ def sibling_path(repo, branch, names=None):
     safe = re.sub(r'[^A-Za-z0-9._-]+', '-', branch).strip('-') or 'run'
     pattern = autopilot_config('worktree').get('path') or WORKTREE_PATH
     extra = {k: re.sub(r'[^A-Za-z0-9._-]+', '-', str(v)).strip('-')
-             for k, v in (names or {}).items() if k in ('slug', 'ticket', 'summary')}
+             for k, v in (names or {}).items() if k in ('slug', 'type', 'summary') and v}
+    name = safe[:1].upper() + safe[1:]
     extra.setdefault('slug', safe)
-    extra.setdefault('ticket', '')
-    extra.setdefault('summary', '')
+    extra.setdefault('type', 'feature')
+    if not extra.get('summary'):
+        extra['summary'] = name
     try:
-        path = pattern.format(parent=main.parent, repo=main.name, branch=safe,
-                              Name=safe[:1].upper() + safe[1:], **extra)
+        path = pattern.format(parent=main.parent, repo=main.name, branch=safe, Name=name, **extra)
     except (KeyError, IndexError, ValueError):
-        path = WORKTREE_PATH.format(parent=main.parent, repo=main.name, branch=safe,
-                                    Name=safe[:1].upper() + safe[1:])
+        path = WORKTREE_PATH.format(parent=main.parent, repo=main.name, branch=safe, Name=name,
+                                    **extra)
     path = re.sub(r'-{2,}', '-', path).replace('/-', '/').replace('-/', '/')
     path = Path(path).expanduser()
     return path if path.is_absolute() else main / path
 
 
-TICKET_RE = re.compile(r'\b([A-Z][A-Z0-9]{1,9}-\d+)\b')
+FIX_WORDS = re.compile(r'(?i)(?<![a-z])(fix|fixes|fixed|bug|bugs|bugfix|hotfix|regression|repair)(?![a-z])')
+BRANCH_PATTERN = '{type}/{slug}'
+PR_TITLE_PATTERN = '{summary}'
 
 
 def plan_heading(plan):
@@ -4792,44 +4800,59 @@ def plan_heading(plan):
     return None
 
 
-def run_names(repo, plan, ticket=None, summary=None):
-    """The branch and worktree folder for a run, after the repository's naming convention.
+def change_type(*texts):
+    """The change type of a plan: bugfix when its name or title names a fix, else feature."""
+    return 'bugfix' if any(FIX_WORDS.search(t or '') for t in texts) else 'feature'
 
-    [worktree] branch (default {slug}) and path (default the workspaces layout) know {slug}
-    (the plan file name without its date), {ticket} and {summary}. A ticket is taken from the
-    argument, else found in the current branch, the plan file name or the plan title
-    (ABC-123). The summary is the argument, else the plan title. A pattern that needs a ticket
-    nobody gave falls back to {slug} and lists it in `needs`.
+
+def run_names(repo, plan, branch=None, summary=None):
+    """The branch and worktree folder for a run, after the naming convention.
+
+    The default convention is {type}/{slug}: type is feature, or bugfix when the plan names a
+    fix, and slug is the plan file name without its date (feature/user-service). [worktree] branch and
+    path in the autopilot config change the patterns; they know {type}, {slug} and {summary}
+    (the plan title). A branch the user names wins over the pattern. A pattern with an
+    unknown placeholder falls back to the default convention and says so in `note`.
     """
     cfg = autopilot_config('worktree')
     slug = plan_branch({'argv': ['ralphex'], 'target': str(plan)})
     title = plan_heading(plan) if plan else None
-    if not ticket:
-        _, current = run_quiet(['git', 'branch', '--show-current'], cwd=repo)
-        for text in (current, Path(str(plan)).name, title):
-            m = TICKET_RE.search(text or '')
-            if m:
-                ticket = m.group(1)
-                break
     summary = summary or title or slug
-    pattern = cfg.get('branch') or '{slug}'
-    path_pattern = cfg.get('path') or WORKTREE_PATH
-    needs = [k for k, v in (('ticket', ticket),)
-             if '{' + k + '}' in pattern + path_pattern and not v]
-    values = {'slug': slug, 'ticket': ticket or '',
+    values = {'slug': slug, 'type': change_type(slug, title),
               'summary': re.sub(r'[^A-Za-z0-9._-]+', '-', summary).strip('-')}
-    branch = slug
-    if not needs:
+    pattern = cfg.get('branch') or BRANCH_PATTERN
+    note = None
+
+    def clean(name):
+        name = re.sub(r'[^A-Za-z0-9._/-]+', '-', name)
+        return re.sub(r'-{2,}', '-', re.sub(r'/{2,}', '/', name)).strip('-/')
+
+    if branch:
+        name = clean(branch) or slug
+    else:
         try:
-            branch = pattern.format(**values)
-        except (KeyError, IndexError, ValueError):
-            branch = slug
-        branch = re.sub(r'[^A-Za-z0-9._/-]+', '-', branch)
-        branch = re.sub(r'-{2,}', '-', re.sub(r'/{2,}', '/', branch)).strip('-/') or slug
-    path = sibling_path(repo, branch, values if not needs else None)
-    return {'branch': branch, 'path': str(path), 'slug': slug, 'ticket': ticket,
-            'summary': summary, 'pattern': pattern, 'needs': needs,
-            'custom': branch != slug or bool(cfg.get('path'))}
+            name = clean(pattern.format(**values))
+        except (KeyError, IndexError, ValueError) as e:
+            note = f'[worktree] branch = {pattern} is not usable ({e}): used {BRANCH_PATTERN}'
+            name = clean(BRANCH_PATTERN.format(**values))
+        name = name or slug
+    path = sibling_path(repo, name, values)
+    return {'branch': name, 'path': str(path), 'slug': slug, 'type': values['type'],
+            'summary': summary, 'pattern': pattern, 'note': note,
+            'custom': name != slug or bool(cfg.get('path'))}
+
+
+def pr_title(plan, branch):
+    """The pull request title after [worktree] pr_title (default the plan title, "{summary}")."""
+    slug = plan_branch({'argv': ['ralphex'], 'target': str(plan)}) if plan else branch
+    summary = (plan_heading(plan) if plan else None) or slug
+    values = {'type': change_type(slug, summary), 'summary': summary, 'slug': slug,
+              'branch': branch}
+    pattern = autopilot_config('worktree').get('pr_title') or PR_TITLE_PATTERN
+    try:
+        return pattern.format(**values).strip() or summary
+    except (KeyError, IndexError, ValueError):
+        return PR_TITLE_PATTERN.format(**values)
 
 
 def worktree_of(repo, branch):
@@ -4895,10 +4918,11 @@ def prepare_worktree(repo, plan, cli_args, path=None, baseline=None):
                 'restore_problems': []}
     if existing:
         die(f'{branch} is checked out in this folder: run here instead of in a new worktree')
-    target = Path(path) if path else sibling_path(repo, branch)
+    title = {'summary': plan_heading(plan)}
+    target = Path(path) if path else sibling_path(repo, branch, title)
     n = 2
     while target.exists() and not path:
-        target = Path(f'{sibling_path(repo, branch)}-{n}')
+        target = Path(f'{sibling_path(repo, branch, title)}-{n}')
         n += 1
     if target.exists():
         die(f'{target} exists and is not a worktree of {branch}')
@@ -4957,7 +4981,7 @@ def cmd_place(args):
     if not repo:
         die('not inside a git repository')
     emit(implementation_place(repo, plan=args.plan, baseline=flow_baseline(args.flow),
-                              ticket=args.ticket, summary=args.summary))
+                              branch_name=args.branch, summary=args.summary))
 
 
 def remote_host(url):
@@ -4966,16 +4990,6 @@ def remote_host(url):
         return 'github'
     if 'gitlab' in url:
         return 'gitlab'
-    return None
-
-
-def plan_title(plan):
-    try:
-        for line in Path(plan).read_text(encoding='utf-8').splitlines():
-            if line.startswith('# '):
-                return line[2:].strip()
-    except OSError:
-        pass
     return None
 
 
@@ -5038,7 +5052,7 @@ def cmd_publish(args):
         out.update(base=base, base_why=base_why)
     _, url = git('config', '--get', f'remote.{remote}.url')
     host = remote_host(url)
-    title = args.title or plan_title(st.get('plan_file') or meta['target']) or branch
+    title = args.title or pr_title(st.get('plan_file') or meta['target'], branch)
     draft = args.draft or st.get('status') != 'done'
     body = Path(args.body_file).read_text(encoding='utf-8') if args.body_file else \
         f'Implements `{Path(meta["target"]).name}` (autopilot run {sdir.name}).\n'
@@ -5245,7 +5259,7 @@ def main(argv=None):
     s.add_argument('--force', action='store_true', help='run even when check-plan says redesign')
     s.add_argument('--flow', help='flow id shared by the sessions of one full run')
     s.add_argument('--new-worktree', action='store_true',
-                   help='make a worktree in <parent>/workspaces/<repo>/<Name> and run there')
+                   help='make a worktree in <parent>/workspaces/<repo>/<Summary> and run there')
     s.add_argument('--worktree-path', help='folder for the new worktree (implies --new-worktree)')
     s.add_argument('--branch', help='name of the run branch (passed to the runner as --branch)')
     s.set_defaults(fn=cmd_run)
@@ -5357,7 +5371,7 @@ def main(argv=None):
     s = sub.add_parser('place')
     s.add_argument('--plan', help='the plan file (an uncommitted plan does not count as dirty)')
     s.add_argument('--flow', help='the flow: lists the files a new worktree takes from here')
-    s.add_argument('--ticket', help='ticket id for {ticket} in [worktree] branch/path patterns')
+    s.add_argument('--branch', help='a run branch name the user asked for (wins over the convention)')
     s.add_argument('--summary', help='text for {summary} (default: the plan title)')
     s.set_defaults(fn=cmd_place)
     s = sub.add_parser('list')

@@ -4,7 +4,7 @@ description: This skill should be used when the user runs "/autopilot" or "$auto
 argument-hint: "[task description | path to an existing plan file] [-- extra runner flags]"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, Skill, Agent, CronCreate, CronDelete
 metadata:
-  version: "0.8.0"
+  version: "0.9.0"
 ---
 
 # Autopilot
@@ -124,12 +124,13 @@ This is the user's main checkpoint: give time to read the plan and the
 explanation. First run `AP place --plan <path> --flow <id>`. It decides
 where the run works best in this checkout ("Where the Run Works" below).
 For a new worktree it also lists `moves`, the files that go with the run.
-Pass `--ticket <ID>` when the task names a ticket. `names` holds the
-proposed branch and folder, after `[worktree] branch` and `path` in
-`.autopilot/config`. Show both in the question. When `names.needs` lists
-`ticket`, ask for it in the same question; without a reply the run uses
-the plan name and logs that. On a new ticket or other names, run `place`
-again with them. Ask one question
+`names` holds the proposed branch and folder. They follow the default
+convention `{type}/{slug}` (`feature/user-service`, or `bugfix/...` when
+the plan names a fix), or `[worktree] branch` and `path` in
+`.autopilot/config`. Show both in the question. Do not ask for a ticket,
+an issue key or a tracker. When the user names a branch, run `place`
+again with `--branch <name>`. When `names.note` is set, tell the user once.
+Ask one question
 in plain text, recommending **Implement in the recommended place** (or
 Revise, when the explanation surfaced a concrete problem), with the
 deadline as a clock time ("Asking" in `references/response-times.md`).
@@ -193,9 +194,10 @@ feature branch works on that branch in place. `AP place` applies these
 rules.
 
 A new worktree is always a new folder in the workspaces layout:
-`<parent>/workspaces/<repo>/<Name>`, where `<parent>` holds the main
-checkout and `<Name>` is the branch with a capital first letter (for
-example `~/Projects/workspaces/ralphex/Add-cache`). `[worktree] path` in
+`<parent>/workspaces/<repo>/<Summary>`, where `<parent>` holds the main
+checkout and `<Summary>` is the plan title (for example
+`~/Projects/workspaces/ralphex/Add-the-cache`). A plan without a title
+uses the branch with a capital first letter. `[worktree] path` in
 `.autopilot/config` changes the pattern. It is on a new branch from the
 current branch. When a worktree for the branch exists already (made by
 any tool, or by hand), autopilot uses it. Only `git` is needed, so this
@@ -245,7 +247,10 @@ report, whatever the outcome:
    started from: `master` for a worktree run planned on `master`, the
    source branch for a run on a feature branch, or the default branch when
    that branch is not on the remote. An open pull request for the branch
-   is reused. A run that did not finish opens a draft.
+   is reused. A run that did not finish opens a draft. The title is the
+   plan title (`Add the user service`), or `[worktree] pr_title` in
+   `.autopilot/config`. Pass `--title` only when the
+   user names a title.
 3. Put the result in the report header: the link, or `skipped` with its
    reason (no remote, `gh`/`glab` missing or logged out, push rejected).
    A failed push or pull request never stops the report.
