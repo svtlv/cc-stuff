@@ -68,8 +68,9 @@ which task stopped and why, at the top.
 ## 1. Decided without you
 | When | Decision | Made by | Why | How to change it |
 Every entry of `without_user`, none skipped, oldest first. "Made by":
-"autopilot, no reply in <N> min" for `auto` (from `waited_min`), "agent"
-for the agent's own choices and fixes, "autopilot" for supervisor
+"autopilot, no reply in <N> min" for `auto` (from `waited_min`), "agent,
+trivial" for a prompt answered at once (its reason starts with `trivial:`),
+"agent" for the agent's other choices and fixes, "autopilot" for supervisor
 choices, "model router" for `agrouter` fallbacks, "plan runner" for
 `ralphex` limit waits. "Why" is the reason from the entry. When
 `recommended` is false, say so ("no recommendation was ready: took the

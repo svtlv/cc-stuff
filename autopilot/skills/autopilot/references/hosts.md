@@ -32,7 +32,7 @@ a nested `claude` or `codex` never believes it runs inside the host.
 | Async process polling (Codex: `exec_command` yielding a session, polled with `write_stdin`) | Start `next`, poll the same process until it exits; keep the turn active | — |
 | Neither | Run `next --timeout 60` and `ask-timer wait --max 60` in the foreground in a loop, posting updates between calls | Runner prompts still auto-answer on the driver's timer |
 | Question tool (AskUserQuestion and similar) | Only for setup, which never runs unattended | Numbered options in plain text |
-| Terminal that can be typed into (Orca tab, tmux, WezTerm, kitty, iTerm2, or `[wake] command`) | The supervisor wakes the owner chat after its usage limit by typing one line: any provider (`control.md`) | Desktop notification |
+| Terminal that can be typed into (Orca tab, tmux, WezTerm, kitty or iTerm2) | The supervisor wakes the owner chat after its usage limit by typing one line: any provider (`control.md`) | Desktop notification |
 | Scheduled prompts (Claude Code: `CronCreate`) | Optional watchdog when the tab cannot be typed into | Typed wake line, notification |
 | Plugin hooks (`UserPromptSubmit`, `Stop`: Claude Code, Codex after trust) | Tell a chat about unwatched runs; keep the owner chat watching | `AP watch-status` at the start of any autopilot skill |
 | Loading a skill by name (Skill tool, `$name`) | Sibling skills, explain-summarize | Read the `SKILL.md` file and follow it |

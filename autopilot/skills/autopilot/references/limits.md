@@ -32,16 +32,16 @@ the exact step and keeps the run's context. That is why the driver adds
 | `limit-retry` event | The runner retried and is still limited. Quiet: does not wake the agent. |
 | `limit-cleared` event | Work resumed; carries the minutes waited. |
 | `transient` event | A 5xx/529 API error the runner retries as a session timeout. Quiet. |
-| `failed`, category `limit` | The reset is beyond `AUTOPILOT_MAX_LIMIT_WAIT` (6 h): the agent decides. |
+| `failed`, category `limit` | The reset is more than 6 h away: the agent decides. |
 
 Limit lines are not counted as errors, and limit restarts do not use up
 the restart budget or the "same error three times" rule.
 
-| Variable | Default | Effect |
-|---|---|---|
-| `AUTOPILOT_LIMIT_WAIT` | 900 | `--wait` added to the runner, and the supervisor's wait when no reset time is known |
-| `AUTOPILOT_LIMIT_MIN` | 60 | Margin added after a known reset time (and the shortest wait) |
-| `AUTOPILOT_MAX_LIMIT_WAIT` | 21600 | Longest wait the supervisor takes alone |
+| Fixed value | Effect |
+|---|---|
+| 15 min | `--wait` added to the runner, and the supervisor's wait when no reset time is known |
+| 1 min | Margin added after a known reset time (and the shortest wait) |
+| 6 h | Longest wait the supervisor takes alone |
 
 ## What to Tell the User
 

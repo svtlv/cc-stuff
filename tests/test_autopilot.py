@@ -707,11 +707,14 @@ class AutopilotDriver(unittest.TestCase):
     def test_unwatched_run_wakes_its_chat_by_typing_into_its_tab(self):
         env = self.milestone_env()
         typed = Path(self.tmp.name) / 'typed.txt'
-        tool = Path(self.tmp.name) / 'type-into-tab'
-        python_tool(tool, f'import sys\nopen({str(typed)!r}, "a").write(sys.argv[1] + "\\n")\n')
-        cfg = Path(self.tmp.name) / 'autopilot.cfg'
-        cfg.write_text(f'[wake]\ncommand = "{tool}" {{text}}\n')
-        env.update(AUTOPILOT_WAKE='type', AUTOPILOT_CONFIG=str(cfg), AUTOPILOT_WAKE_AFTER_S='1',
+        bindir = Path(self.tmp.name) / 'faketmux'
+        bindir.mkdir()
+        # a fake tmux: the wake line follows send-keys -l
+        python_tool(bindir / 'tmux', 'import sys\nargs = sys.argv[1:]\nif "-l" in args:\n'
+                    f'    open({str(typed)!r}, "a").write(args[args.index("-l") + 1] + "\\n")\n')
+        env.update(TMUX_PANE='%1', PATH=str(bindir) + os.pathsep + env.get('PATH', ''))
+        env.pop('AUTOPILOT_WAKE', None)
+        env.update(AUTOPILOT_WAKE_AFTER_S='1',
                    AUTOPILOT_WAKE_EVERY_S='3', AUTOPILOT_LINGER_S='60', AUTOPILOT_WAKE_CHECK_S='0.5')
         sid = self.drive('run', '--plan', 'p.md', env=env)['session']
         # nobody waits: the supervisor types the wake line into the owner's tab
@@ -1510,9 +1513,23 @@ class StepsSummary(unittest.TestCase):
         self.assertEqual(autopilot.steps_summary(['add `Cache` to `pkg/x.go`.', 'write tests;']),
                          'add Cache to pkg/x.go; write tests')
         long = ['step ' + 'x' * 120, 'two', 'three']
-        out = autopilot.steps_summary(long, limit=100)
+        out = autopilot.steps_summary(long, limit=80)
         self.assertTrue(out.startswith('step ') and '...; two' in out and out.endswith('(+1 more)'), out)
 
+
+    def test_each_step_is_a_short_phrase(self):
+        steps = ['add `SessionSpec{ID string; Resume bool}` and `Result.SessionID` to the executor package',
+                 'add `(*ClaudeExecutor).RunSession(ctx, prompt, spec)`; `Run` calls it with an empty spec',
+                 '`Loop`: keep one round per iteration. `Loop` handles `TimedOut` first',
+                 'cross-compile check: `GOOS=windows go build ./...`']
+        self.assertEqual(autopilot.step_phrase(steps[0]),
+                         'add SessionSpec and Result.SessionID to the executor package')
+        self.assertEqual(autopilot.step_phrase(steps[1]), 'add (*ClaudeExecutor).RunSession')
+        self.assertEqual(autopilot.step_phrase(steps[2]), 'Loop: keep one round per iteration')
+        self.assertEqual(autopilot.step_phrase(steps[3]), 'cross-compile check: GOOS=windows go build ./...')
+        long = autopilot.step_phrase('record the session id from the stderr stream of the process ' * 3)
+        self.assertTrue(long.endswith('...') and len(long) <= 70 and ' ' in long[-12:], long)
+        self.assertTrue(autopilot.steps_summary(steps).endswith('(+1 more)'))
 
 class PlanReviewPick(unittest.TestCase):
     def pick(self, external=True, same=True, executor='claude', revised=0):
@@ -1593,12 +1610,13 @@ class ToolUpdates(unittest.TestCase):
             self.assertEqual(autopilot.latest_versions()[1], 'fresh')
             self.assertEqual(fetch.call_count, 2)
 
-    def test_check_off_asks_nothing(self):
+    def test_check_ignores_an_old_updates_setting(self):
         self.config.stop()
         with unittest.mock.patch.object(autopilot, 'autopilot_config', return_value={'check': 'off'}), \
-                unittest.mock.patch.object(autopilot, 'fetch_latest') as fetch:
-            self.assertEqual(autopilot.latest_versions(), ({}, 'off', {}))
-            fetch.assert_not_called()
+                unittest.mock.patch.object(autopilot, 'fetch_latest',
+                                          return_value={'cli': 'v9.9.9', 'router': 'v9.9.9'}) as fetch:
+            self.assertEqual(autopilot.latest_versions()[1], 'fresh')
+            fetch.assert_called()
         self.config.start()
 
     def test_skipped_release_is_not_offered_but_a_newer_one_is(self):
@@ -1774,7 +1792,7 @@ class ImplementationPlace(unittest.TestCase):
             self.assertIsNone(autopilot.flow_baseline('f3'))
             self.assertIsNone(autopilot.flow_baseline(None))
 
-    def test_worktree_path_follows_the_workspaces_layout_or_the_config(self):
+    def test_worktree_path_follows_the_workspaces_layout(self):
         wt = Path(self.tmp.name) / 'wt'
         git(self.repo, 'worktree', 'add', '-q', '-b', 'side', str(wt))
         # from a linked worktree the layout still hangs off the main checkout's folder
@@ -1785,8 +1803,9 @@ class ImplementationPlace(unittest.TestCase):
                          (self.repo.parent / 'workspaces/repo/Add-the-cache').resolve())
         with unittest.mock.patch.object(autopilot, 'autopilot_config',
                                         return_value={'path': '{parent}/wt/{repo}-{branch}'}):
+            # an old [worktree] path setting is not read
             self.assertEqual(autopilot.sibling_path(str(self.repo), 'add-cache').resolve(),
-                             (self.repo.parent / 'wt/repo-add-cache').resolve())
+                             (self.repo.parent / 'workspaces/repo/Add-cache').resolve())
 
     def test_run_with_a_new_worktree_starts_inside_it(self):
         plan = self.repo / 'docs/plans/20261116-add-cache.md'
@@ -2485,95 +2504,6 @@ class ExecutionChecks(unittest.TestCase):
             self.assertIn('disabled for routing', blocked['reason'])
 
 
-class CompactBeforeRun(unittest.TestCase):
-    """End of planning: the chat ends its turn, /compact is typed, then the resume line."""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.state = Path(self.tmp.name) / 'state'
-        self.handoff = Path(self.tmp.name) / 'handoff.md'
-        self.handoff.write_text('flow f1, plan docs/plans/x.md, implement in a new worktree\n')
-        env = {'AUTOPILOT_STATE_DIR': str(self.state), 'AUTOPILOT_CONFIG': '/none',
-               'AUTOPILOT_COMPACT_POLL_S': '0.05', 'CLAUDE_CODE_SESSION_ID': 'chat-1'}
-        patch = unittest.mock.patch.dict(os.environ, env)
-        patch.start()
-        self.addCleanup(patch.stop)
-        for name, value in (('COMPACT_POLL_S', 0.05), ('COMPACT_NO_HOOK_S', 0.2),
-                            ('COMPACT_IDLE_S', 2), ('COMPACT_DONE_S', 2)):
-            p = unittest.mock.patch.object(autopilot, name, value)
-            p.start()
-            self.addCleanup(p.stop)
-
-    def request(self, tab):
-        out = []
-        with unittest.mock.patch.object(autopilot, 'own_tab', return_value=tab), \
-                unittest.mock.patch.object(autopilot, 'autopilot_config', return_value={}), \
-                unittest.mock.patch.object(autopilot.subprocess, 'Popen') as popen, \
-                unittest.mock.patch.object(autopilot, 'emit', side_effect=out.append):
-            autopilot.cmd_compact(autopilot.argparse.Namespace(
-                flow='f1', handoff=str(self.handoff), focus=None))
-        return out[0], popen
-
-    def hook(self, event, **data):
-        out = []
-        with unittest.mock.patch('builtins.print', side_effect=out.append):
-            handled = autopilot.compact_hook(event, {'session_id': 'chat-1', **data})
-        return handled, out
-
-    def test_turn_end_then_compact_then_resume(self):
-        res, popen = self.request({'kind': 'tmux', 'handle': '%1', 'bin': 'tmux'})
-        self.assertTrue(res['ok'])
-        self.assertIn('Step 5', res['resume_line'])
-        self.assertEqual(popen.call_args.args[0][2:4], ['_compact', res['request']])
-        typed = []
-
-        def fake_type(argv, timeout=15, cwd=None):
-            typed.append(argv[argv.index('-l') + 1])
-            if typed[-1].startswith('/compact'):
-                # the host compacts and fires SessionStart with the compact source
-                handled, out = self.hook('session-start', source='compact')
-                self.assertTrue(handled)
-                self.assertIn(str(self.handoff), json.loads(out[0])['hookSpecificOutput']
-                              ['additionalContext'])
-            return 0, ''
-
-        handled, _ = self.hook('stop')  # the chat ended its turn
-        self.assertTrue(handled)
-        with unittest.mock.patch.object(autopilot, 'run_quiet', side_effect=fake_type), \
-                unittest.mock.patch.object(autopilot.time, 'sleep'):
-            autopilot.cmd_compact_helper(autopilot.argparse.Namespace(request=res['request']))
-        self.assertEqual(len(typed), 2)
-        self.assertTrue(typed[0].startswith('/compact Keep only what the autopilot run needs: flow f1'))
-        self.assertEqual(typed[1], res['resume_line'])
-        req = json.loads(Path(res['request']).read_text())
-        self.assertEqual((req['status'], req['compacted']), ('done', True))
-        # another chat's turn end or a normal start does nothing
-        self.assertEqual(self.hook('stop'), (False, []))
-        self.assertEqual(self.hook('session-start', source='startup'), (False, []))
-
-    def test_no_turn_end_sends_only_the_resume_line(self):
-        res, _ = self.request({'kind': 'tmux', 'handle': '%1', 'bin': 'tmux'})
-        typed = []
-        with unittest.mock.patch.object(autopilot, 'run_quiet',
-                                        side_effect=lambda a, **k: typed.append(a) or (0, '')), \
-                unittest.mock.patch.object(autopilot, 'COMPACT_IDLE_S', 0.1):
-            autopilot.cmd_compact_helper(autopilot.argparse.Namespace(request=res['request']))
-        self.assertEqual(len(typed), 1)
-        self.assertIn(res['resume_line'], typed[0])
-        self.assertEqual(json.loads(Path(res['request']).read_text())['status'],
-                         'resumed-without-compact')
-
-    def test_skipped_without_a_tab_or_when_off(self):
-        res, popen = self.request(None)
-        self.assertFalse(res['ok'])
-        self.assertIn('cannot be typed into', res['skipped'])
-        popen.assert_not_called()
-        with unittest.mock.patch.dict(os.environ, {'AUTOPILOT_COMPACT': 'off'}):
-            res, _ = self.request({'kind': 'tmux', 'handle': '%1', 'bin': 'tmux'})
-        self.assertIn('mode = off', res['skipped'])
-
-
 class FieldReportFixes(unittest.TestCase):
     """The problems of a Windows run (ATH-2386): one test each."""
 
@@ -2706,7 +2636,7 @@ class RunNames(unittest.TestCase):
         with self.config():
             n = autopilot.run_names(str(self.repo), self.plan)
             place = autopilot.implementation_place(str(self.repo), {}, self.plan)
-        self.assertEqual((n['branch'], n['type'], n['note']), ('feature/user-service', 'feature', None))
+        self.assertEqual((n['branch'], n['type']), ('feature/user-service', 'feature'))
         self.assertEqual(Path(n['path']).name, 'Add-the-user-service')
         self.assertEqual(place['options'][0]['run_args'],
                          ['--new-worktree', '--branch', 'feature/user-service',
@@ -2729,21 +2659,19 @@ class RunNames(unittest.TestCase):
         self.assertEqual(Path(n['path']).name, 'Add-the-user-service')
         self.assertEqual(asked['branch'], 'my/own-branch')
 
-    def test_an_old_ticket_pattern_falls_back_without_asking(self):
-        with self.config(branch='feature/{ticket}/{slug}'):
+    def test_old_worktree_settings_are_not_read(self):
+        with self.config(branch='feature/{ticket}/{slug}', path='{parent}/x/{branch}',
+                         pr_title='[{branch}] {summary}'):
             n = autopilot.run_names(str(self.repo), self.plan)
+            title = autopilot.pr_title(self.plan, n['branch'])
         self.assertEqual(n['branch'], 'feature/user-service')
-        self.assertIn('{ticket}', n['note'])
+        self.assertEqual(Path(n['path']).name, 'Add-the-user-service')
+        self.assertEqual(title, 'Add the user service')
 
     def test_pr_title_follows_the_convention(self):
         with self.config():
             self.assertEqual(autopilot.pr_title(self.plan, 'feature/user-service'),
                              'Add the user service')
-        with unittest.mock.patch.object(autopilot, 'autopilot_config',
-                                        side_effect=lambda section: {'pr_title': '[{branch}] {summary}'}
-                                        if section == 'worktree' else {}):
-            self.assertEqual(autopilot.pr_title(self.plan, 'feature/user-service'),
-                             '[feature/user-service] Add the user service')
 
     def test_a_plan_git_ignores_stops_the_run_with_a_clear_message(self):
         (self.repo / '.gitignore').write_text('docs/plans/\n')

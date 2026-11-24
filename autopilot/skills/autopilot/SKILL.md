@@ -4,7 +4,7 @@ description: This skill should be used when the user runs "/autopilot" or "$auto
 argument-hint: "[task description | path to an existing plan file] [-- extra runner flags]"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, Skill, Agent, CronCreate, CronDelete
 metadata:
-  version: "0.9.0"
+  version: "0.10.0"
 ---
 
 # Autopilot
@@ -50,7 +50,11 @@ host, with or without a way to load skills by name (`references/hosts.md`):
 The flow keeps going when the user steps away. Read "Unattended Defaults"
 in `monitoring.md` before Step 2:
 
-- every question carries a recommended answer, taken when its response
+- trivial questions (the plan draft, the plan review questions, names,
+  choices the codebase settles) get the recommended answer at once, with
+  one `⏩` line; only critical questions wait for the user ("Critical or
+  Trivial" in `references/response-times.md`);
+- every critical question carries a recommended answer, taken when its response
   time passes without a reply (`references/response-times.md`): 10 min for
   planner questions, 30 min for the draft, **60 min to decide whether to
   implement**; reminders before the long ones, and "wait" buys more time;
@@ -96,12 +100,12 @@ in the workspaces folder ("Where the Run Works").
 ## Step 2 — Plan
 
 Follow `autopilot-plan` Steps 3–5 with the description. Relay every
-question and draft to the user in order, with a registered recommendation
-and its response time. After the plan file exists, ralphex runs its own
+question and draft in order, with a registered recommendation. Answer the
+trivial ones at once; ask the user only the critical ones, with the
+response time. After the plan file exists, ralphex runs its own
 plan review and asks two more questions: which reviewer, then which
 findings to apply. Relay them the same way (`references/reviews.md`).
-They also have recommended answers and response times, so planning never
-blocks on them. Planning ends with a `plan_file`, or with a rejected
+They are trivial: answer them at once with the recommendation. Planning ends with a `plan_file`, or with a rejected
 draft: then skip to Step 6 and report why it ended.
 
 ## Step 3 — Explain the Plan
@@ -124,12 +128,11 @@ This is the user's main checkpoint: give time to read the plan and the
 explanation. First run `AP place --plan <path> --flow <id>`. It decides
 where the run works best in this checkout ("Where the Run Works" below).
 For a new worktree it also lists `moves`, the files that go with the run.
-`names` holds the proposed branch and folder. They follow the default
+`names` holds the proposed branch and folder. They follow the fixed
 convention `{type}/{slug}` (`feature/user-service`, or `bugfix/...` when
-the plan names a fix), or `[worktree] branch` and `path` in
-`.autopilot/config`. Show both in the question. Do not ask for a ticket,
+the plan names a fix). Show both in the question. Do not ask for a ticket,
 an issue key or a tracker. When the user names a branch, run `place`
-again with `--branch <name>`. When `names.note` is set, tell the user once.
+again with `--branch <name>`.
 Ask one question
 in plain text, recommending **Implement in the recommended place** (or
 Revise, when the explanation surfaced a concrete problem), with the
@@ -143,8 +146,8 @@ the plan now?" --waited <N>` when the timer expired.
 
 | Option | Effect |
 |---|---|
-| Implement in the recommended place (`place.options[0]`) | Step 4b, then Step 5 with that option's `run_args` (`--new-worktree` for a new worktree, none for here). Name the place, its `path` and `place.why`. For a new worktree, say how many files move there (`moves`) and that this checkout gets them back as committed. |
-| Implement in the other place (`place.options[1]`) | Only when it is `usable`; otherwise show it with its `reason`, not as a choice. Then Step 4b and Step 5. |
+| Implement in the recommended place (`place.options[0]`) | Step 5 with that option's `run_args` (`--new-worktree` for a new worktree, none for here). Name the place, its `path` and `place.why`. For a new worktree, say how many files move there (`moves`) and that this checkout gets them back as committed. |
+| Implement in the other place (`place.options[1]`) | Only when it is `usable`; otherwise show it with its `reason`, not as a choice. Then Step 5. |
 | Revise the plan | Ask what to change, then run one revision round per `references/plan-revision.md` (direct edit for small changes, re-plan for a new approach), show what changed, and ask this question again with a fresh timer. Repeat as often as the user wants. |
 | Stop here | Go to Step 6. The report names the plan and the command to run it later, in the host's form ("Naming the Commands" in `references/hosts.md`). |
 
@@ -165,28 +168,6 @@ Plan explained above. Implement it now?
 I'll start option 1 at 16:40 (in 60 min) if you don't answer.
 ```
 
-## Step 4b — Compact Before the Run
-
-Planning fills the context with questions, drafts and reviews that the run
-does not need. Compact the chat once, after the decision to implement and
-before the run starts. Skip this step when the user chose Revise or Stop.
-
-1. Write a handoff file in the plan session folder (`handoff.md`): the flow
-   id, the plan path, the chosen place with its `run_args`, the base branch,
-   the publish choice, wishes the user gave for the run, and the driver path.
-2. Log it: `AP log <plan-session> --kind decision --by autopilot --text
-   "compact the context before the run" --reason "planning is done"`.
-3. Run `AP compact --flow <id> --handoff <file>`.
-   - `ok: true`: post one line ("Planning is done. I compact the context,
-     then start the run.") and end the turn at once. Start no background
-     command. The driver types `/compact` into this chat after the turn
-     ends, then types its `resume_line`.
-   - `ok: false`: post `skipped` in one line and go on with Step 5 now.
-4. On the resume line, read the handoff file and continue with Step 5.
-
-The user can also write while this happens: the host queues the message,
-and the chat answers it after the compaction.
-
 ### Where the Run Works
 
 The runner can make a worktree only from the default branch. A run on a
@@ -197,8 +178,7 @@ A new worktree is always a new folder in the workspaces layout:
 `<parent>/workspaces/<repo>/<Summary>`, where `<parent>` holds the main
 checkout and `<Summary>` is the plan title (for example
 `~/Projects/workspaces/ralphex/Add-the-cache`). A plan without a title
-uses the branch with a capital first letter. `[worktree] path` in
-`.autopilot/config` changes the pattern. It is on a new branch from the
+uses the branch with a capital first letter. It is on a new branch from the
 current branch. When a worktree for the branch exists already (made by
 any tool, or by hand), autopilot uses it. Only `git` is needed, so this
 works the same in Claude Code and Codex. `AP run --new-worktree` makes it with
@@ -248,8 +228,7 @@ report, whatever the outcome:
    source branch for a run on a feature branch, or the default branch when
    that branch is not on the remote. An open pull request for the branch
    is reused. A run that did not finish opens a draft. The title is the
-   plan title (`Add the user service`), or `[worktree] pr_title` in
-   `.autopilot/config`. Pass `--title` only when the
+   plan title (`Add the user service`). Pass `--title` only when the
    user names a title.
 3. Put the result in the report header: the link, or `skipped` with its
    reason (no remote, `gh`/`glab` missing or logged out, push rejected).
@@ -297,8 +276,9 @@ subagent support, do the same work inline.
 
 Write all text for the user in ASD-STE100 Simplified Technical English:
 chat messages, questions, summaries, reports and the Note under each
-diagram. Do not apply it to code, identifiers, file paths, commands, quotes
-or error messages. Keep them exactly as they are.
+diagram. Do not apply it to code, identifiers, file paths, commands, quotes,
+error messages or the driver's update lines (`▶`, `✓`, `⚠`, `⏱` lines and
+their `Plan:`/`Done:` lines). Keep them exactly as they are.
 
 - Use one word for one meaning. Use simple, common words and keep the
   same technical name for the same thing.

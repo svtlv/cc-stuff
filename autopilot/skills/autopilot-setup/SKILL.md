@@ -4,7 +4,7 @@ description: This skill should be used when the user runs "/autopilot-setup" or 
 argument-hint: "[tools | key | repo | reconfigure] (default: all, or reconfigure when the repository is already set up)"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion
 metadata:
-  version: "0.9.0"
+  version: "0.10.0"
 ---
 
 # Autopilot Setup
@@ -215,8 +215,8 @@ teammates and CI may have no global config.
    the chosen docs exceed about 60 KB in total (sum file sizes), the
    long-context limits ("Large Doc Sets"). Never a key.
 5. `.autopilot/config` keeps its template defaults. Response times
-   (Stage 4b), the update check and the worktree path go there when the
-   user changes them for this repository.
+   (Stage 4b) go there when the user changes them for this repository.
+   They are the only autopilot setting.
 6. Do not edit the root `.gitignore`. The runner writes
    `.ralphex/.gitignore` (`progress/`, `worktrees/`) and the router writes
    `.agrouter/.gitignore` (`logs/`). Commit both.

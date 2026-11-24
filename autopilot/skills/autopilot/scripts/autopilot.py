@@ -693,28 +693,7 @@ def autopilot_template():
     lines = ['# autopilot repository config: committed, shared by everyone who runs autopilot here.',
              '# Layering: built-in defaults < ~/.config/autopilot/config (AUTOPILOT_CONFIG)',
              '# < this file < AUTOPILOT_TIMEOUTS. Comments must be on their own lines.',
-             '', '[updates]',
-             '# check: how often the skills look for newer ralphex.windows and agrouter',
-             '# releases on GitHub at their start and offer an upgrade (24h, 1h, 0 = every',
-             '# start, off = never)',
-             '# check = 24h',
-             '', '[compact]',
-             '# mode: at the end of planning, type /compact into the chat before the run',
-             '# starts, then wake it to start the run (type), or keep the context (off)',
-             '# mode = type',
-             '', '[worktree]',
-             '# path: where a new worktree for a run goes (the workspaces layout by default).',
-             '#   {parent} the folder that holds this repository, {repo} its name,',
-             '#   {branch} the run branch, {Name} the branch with a capital first letter,',
-             '#   {summary} the plan title (else {Name})',
-             '# path = {parent}/workspaces/{repo}/{summary}',
-             '# branch: the run branch name. {type} feature, or bugfix when the plan names a fix,',
-             '#   {slug} the plan file name without its date, {summary} the plan title.',
-             '#   path knows {type}, {slug} and {summary} too. A branch the user names wins.',
-             '# branch = {type}/{slug}',
-             '# pr_title: the pull request title. {type}, {summary} the plan title, {slug},',
-             '#   {branch}. A title the user names wins.',
-             '# pr_title = {summary}',
+             '# Only the response times are configurable: names, updates and wake are fixed.',
              '', '[timeouts]',
              '# Response time per decision: 90s, 10m, 1h, 1h30m or never. After it the',
              '# recommended answer is taken and logged. <key>.remind sets a reminder before it.']
@@ -737,7 +716,8 @@ def fmt_duration(seconds):
 
 
 # sections autopilot no longer reads: the chat decides these per run
-OBSOLETE_SECTIONS = ('review', 'publish')
+# sections autopilot no longer reads: the pipeline hardcodes them; only [timeouts] is read
+OBSOLETE_SECTIONS = ('review', 'publish', 'updates', 'wake', 'compact', 'worktree')
 
 
 def cmd_config_init(args):
@@ -876,7 +856,7 @@ def tool_info(name):
 
 # where the newest releases come from: doctor key -> (GitHub repository, tag filter)
 UPDATE_SOURCES = {'cli': ('svtlv/ralphex', '-windows'), 'router': ('svtlv/agrouter', None)}
-UPDATE_INTERVAL = '24h'   # [updates] check: how long a lookup stays fresh; off disables it
+UPDATE_INTERVAL = 24 * 3600   # how long a release lookup stays fresh
 UPDATE_RETRY = 3600       # a failed lookup (offline, GitHub limit) is retried after an hour
 
 
@@ -956,17 +936,12 @@ def fetch_latest():
 def latest_versions(force=False):
     """(latest tags, how they were got: fresh / cached / off, skipped tags per tool).
 
-    The lookup runs at most once per [updates] check interval (24h by default), so each start
-    of a skill costs no GitHub request; force (doctor --latest) always asks GitHub.
+    The lookup runs at most once per UPDATE_INTERVAL (24h), so each start of a skill costs no
+    GitHub request; force (doctor --latest) always asks GitHub.
     """
     cache = read_update_cache()
     skipped = cache.get('skipped') or {}
-    try:
-        interval = parse_duration(autopilot_config('updates').get('check', UPDATE_INTERVAL))
-    except ValueError:
-        interval = parse_duration(UPDATE_INTERVAL)
-    if interval is None and not force:
-        return {}, 'off', skipped
+    interval = UPDATE_INTERVAL
     latest = cache.get('latest') or {}
     complete = all(latest.get(key) for key in UPDATE_SOURCES)
     fresh_for = interval if complete else min(interval or 0, UPDATE_RETRY)
@@ -1678,8 +1653,8 @@ def missing_repo_configs(repo, cfg):
                   if sec in OBSOLETE_SECTIONS}) if own.exists() else []
     if old:
         issues.append(f"the autopilot config (.autopilot/config) sets {', '.join(old)}, which "
-                      'autopilot no longer reads (plan review is always auto, runs always open '
-                      'a pull request; change either in the chat): remove them')
+                      'autopilot no longer reads (only [timeouts] is configurable; names, '
+                      'updates and wake are fixed; there is no compaction step): remove them')
     return issues
 
 
@@ -1915,7 +1890,6 @@ WAKE_TERMINALS = [
 
 def own_tab():
     """The terminal tab this command runs in, when its terminal can be typed into; else None."""
-    custom = autopilot_config('wake').get('command')
     for kind, var, _ in WAKE_TERMINALS:
         handle = os.environ.get(var, '').strip()
         if not handle:
@@ -1938,15 +1912,11 @@ def own_tab():
             tab['bin'] = shutil.which(kind)
         if tab.get('bin'):
             return tab
-    if custom:  # any other terminal: [wake] command = mytool send {text}
-        return {'kind': 'custom', 'command': custom}
     return None
 
 
 def wake_argv(tab, text):
     """The command that types text (and Enter) into tab."""
-    if tab['kind'] == 'custom':
-        return [a.replace('{text}', text) for a in split_args(tab['command'])]
     spec = next(t for k, _, t in WAKE_TERMINALS if k == tab['kind'])
     quoted = text.replace('\\', '\\\\').replace('"', '\\"')
     applescript = ('tell application "iTerm2"\nrepeat with w in windows\n'
@@ -1976,15 +1946,9 @@ def notify(title, text):
         run_quiet(['notify-send', title, text])
 
 
-def split_args(text):
-    import shlex
-    return shlex.split(text, posix=not WINDOWS)
-
-
 def wake_mode():
-    """type (type into the owner's tab, else notify), notify, or off."""
-    mode = (os.environ.get('AUTOPILOT_WAKE') or autopilot_config('wake').get('mode') or 'type').lower()
-    return mode if mode in ('type', 'notify', 'off') else 'type'
+    """type (type into the owner's tab, else notify). AUTOPILOT_WAKE=off is for tests only."""
+    return 'off' if os.environ.get('AUTOPILOT_WAKE') == 'off' else 'type'
 
 
 def start_session(kind, target, cli_args, max_restarts, flow=None, extra=None):
@@ -3717,162 +3681,6 @@ def describe_run(w, chat):
             f"{w['unseen_updates']} update(s) not posted yet. {who}.")
 
 
-# ---------------------------------------------------------------- compaction before the run
-
-COMPACT_IDLE_S = float(os.environ.get('AUTOPILOT_COMPACT_IDLE_S', 900))   # wait for the turn end
-COMPACT_DONE_S = float(os.environ.get('AUTOPILOT_COMPACT_DONE_S', 600))   # wait for the compaction
-COMPACT_NO_HOOK_S = float(os.environ.get('AUTOPILOT_COMPACT_NO_HOOK_S', 180))  # host without a hook
-COMPACT_POLL_S = float(os.environ.get('AUTOPILOT_COMPACT_POLL_S', 1))
-
-
-def compact_dir():
-    return state_root() / 'compact'
-
-
-def compact_mode():
-    """type (type /compact into the chat's tab) or off."""
-    mode = (os.environ.get('AUTOPILOT_COMPACT') or autopilot_config('compact').get('mode')
-            or 'type').lower()
-    return mode if mode in ('type', 'off') else 'type'
-
-
-def compact_requests(chat, status):
-    """Open compaction requests of this chat in the given status."""
-    root = compact_dir()
-    if not chat or not root.exists():
-        return []
-    out = []
-    for path in sorted(root.glob('*.json')):
-        req = read_json(path, {}) or {}
-        if req.get('owner') == chat and req.get('status') == status:
-            out.append((path, req))
-    return out
-
-
-def resume_line(req):
-    return (f"autopilot: context compacted. Continue flow {req['flow']} at Step 5 (Run): read "
-            f"{req['handoff']} and start the run as it says")
-
-
-def cmd_compact(args):
-    """Compact the chat's context at the end of planning, then wake it to start the run.
-
-    No agent host lets the agent compact its own context. The chat writes a handoff file,
-    calls this and ends its turn. A detached helper waits for the Stop hook (the turn ended),
-    types `/compact <focus>` into the chat's terminal tab, waits for the SessionStart
-    (compact) hook, and types the resume line. The SessionStart hook also puts the handoff
-    pointer into the new context.
-    """
-    handoff = Path(args.handoff).expanduser().resolve()
-    if not handoff.is_file():
-        die(f'handoff file not found: {handoff}')
-    tab = own_tab()
-    owner = host_session_id()
-    skipped = ('compaction is off ([compact] mode = off)' if compact_mode() == 'off'
-               else 'this terminal cannot be typed into (no supported terminal and no '
-                    '[wake] command)' if not tab
-               else 'the chat session id is unknown, so the turn end cannot be seen' if not owner
-               else None)
-    if skipped:
-        emit({'ok': False, 'skipped': skipped})
-        return
-    focus = args.focus or (f'Keep only what the autopilot run needs: flow {args.flow}, the plan '
-                           f'file, the decision to implement and where, open wishes of the '
-                           f'user. The handoff file {handoff} holds the details.')
-    compact_dir().mkdir(parents=True, exist_ok=True)
-    path = compact_dir() / f"{args.flow}-{time.strftime('%H%M%S')}.json"
-    req = {'flow': args.flow, 'owner': owner, 'tab': tab, 'handoff': str(handoff),
-           'focus': one_line(focus), 'created': now(), 'status': 'waiting-idle'}
-    write_json(path, req)
-    with open(compact_dir() / 'helper.log', 'ab') as log:  # the helper keeps its own copy
-        subprocess.Popen([sys.executable, str(SCRIPT), '_compact', str(path)], cwd=os.getcwd(),
-                         stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                         **detach_kwargs())
-    emit({'ok': True, 'request': str(path), 'how': f"typed into the {tab['kind']} tab",
-          'resume_line': resume_line(req)})
-
-
-def cmd_compact_helper(args):
-    """_compact REQUEST: wait for the turn end, type /compact, wait, type the resume line."""
-    path = Path(args.request)
-
-    def update(**fields):
-        req = read_json(path, {}) or {}
-        req.update(fields)
-        write_json(path, req)
-        return req
-
-    def wait_for(key, limit):
-        end = now() + limit
-        while now() < end:
-            req = read_json(path, {}) or {}
-            if req.get(key) or req.get('status') == 'cancelled':
-                return req
-            time.sleep(COMPACT_POLL_S)
-        return read_json(path, {}) or {}
-
-    def type_line(req, text):
-        code, out = run_quiet(wake_argv(req['tab'], text), timeout=20)
-        return code == 0, out
-
-    req = wait_for('idle_at', COMPACT_IDLE_S)
-    if req.get('status') == 'cancelled':
-        return
-    if not req.get('idle_at'):
-        # the turn never ended in time: typing /compact into a busy chat is not safe;
-        # the resume line is (a busy chat queues it as a message)
-        ok, out = type_line(req, resume_line(req))
-        update(status='resumed-without-compact', resumed_at=now(),
-               error=None if ok else out[-200:])
-        return
-    time.sleep(2)  # the host finishes the turn after its Stop hook
-    update(status='compacting', typed_at=now())  # before typing: the hook can come fast
-    ok, out = type_line(req, f"/compact {req['focus']}")
-    if not ok:
-        # /compact did not reach the chat: still wake it, so the run starts
-        ok, out2 = type_line(req, resume_line(req))
-        if not ok:
-            notify('autopilot', 'Could not wake the chat. Open it and say "continue".')
-        update(status='resumed-without-compact' if ok else 'failed', resumed_at=now(),
-               error=(out if ok else out2)[-200:])
-        return
-    req = wait_for('compacted_at', COMPACT_DONE_S)
-    if not req.get('compacted_at'):
-        # a host without a SessionStart (compact) hook: give the compaction a fixed time
-        time.sleep(max(0.0, COMPACT_NO_HOOK_S - (now() - req.get('typed_at', now()))))
-    time.sleep(3)  # the host shows its prompt again after the compaction
-    ok, out = type_line(req, resume_line(req))
-    update(status='done' if ok else 'failed', resumed_at=now(),
-           compacted=bool(req.get('compacted_at')), error=None if ok else out[-200:])
-
-
-def compact_hook(event, data):
-    """The Stop and SessionStart (compact) parts of the compaction; True when they handled it."""
-    chat = data.get('session_id')
-    if event == 'stop':
-        pending = compact_requests(chat, 'waiting-idle')
-        for path, req in pending:
-            req['idle_at'] = now()
-            write_json(path, req)
-        return bool(pending)  # the turn must end now: never block it
-    if event == 'session-start' and data.get('source') == 'compact':
-        done = compact_requests(chat, 'compacting')
-        for path, req in done:
-            req['compacted_at'] = now()
-            write_json(path, req)
-        if done:
-            req = done[-1][1]
-            print(json.dumps({'hookSpecificOutput': {
-                'hookEventName': 'SessionStart',
-                'additionalContext': f"Autopilot compacted this chat before the run of flow "
-                                     f"{req['flow']}. The handoff file {req['handoff']} holds the "
-                                     'plan, the decision and the run arguments. A resume line '
-                                     'follows: then read it and continue the autopilot skill at '
-                                     'Step 5.'}}))
-        return bool(done)
-    return False
-
-
 def cmd_hook(args):
     """Plugin hooks: tell a chat about runs nobody watches; keep the owner chat watching.
 
@@ -3882,11 +3690,6 @@ def cmd_hook(args):
         data = json.loads(sys.stdin.read() or '{}')
     except ValueError:
         data = {}
-    try:
-        if compact_hook(args.event, data):
-            return
-    except Exception:
-        pass
     chat = data.get('session_id')
     runs = runs_needing_attention(data.get('cwd') or os.getcwd())
     if not runs:
@@ -4061,21 +3864,37 @@ def fallback_values(e):
     return ', '.join(out) or f'{cli} defaults'
 
 
-def steps_summary(steps, limit=200):
+def step_phrase(text, width=70):
+    """One plan step as a short phrase: no {...} groups or argument lists, the first sentence,
+    cut at a word boundary."""
+    text = re.sub(r'\s+', ' ', text.replace('`', '')).strip()
+    for _ in range(3):  # nested groups
+        text = re.sub(r'\{[^{}]*\}|\([^()]*,[^()]*\)|\([^()]{25,}\)', '', text)
+    text = re.sub(r'\s+([.,;:])(?=\s|$)', r'\1', re.sub(r'\s{2,}', ' ', text)).strip()
+    cuts = [m.start() for m in re.finditer(r'\. |; | — | - ', text) if m.start() >= 20]
+    if cuts:
+        text = text[:cuts[0]]
+    end = re.compile(r'(?<![./])[\s.;,:]+$')  # sentence ends, not "./..." in a command
+    text = end.sub('', text)
+    if len(text) > width:
+        space = text.rfind(' ', 0, width - 3)
+        text = end.sub('', text[:space] if space >= 40 else text[:width - 3]) + '...'
+    return text
+
+
+def steps_summary(steps, limit=200, most=3):
     """The plan's checklist items of one task as one short line, or None."""
+    items = [step_phrase(t) for t in steps]
+    items = [t for t in items if t]
     out, used = [], 0
-    for text in steps:
-        text = re.sub(r'\s+', ' ', text.replace('`', '')).strip().rstrip('.;')
-        if not text:
-            continue
-        text = text if len(text) <= 90 else text[:87].rstrip() + '...'
-        if out and used + len(text) + 2 > limit:
+    for text in items:
+        if out and (len(out) >= most or used + len(text) + 2 > limit):
             break
         out.append(text)
         used += len(text) + 2
     if not out:
         return None
-    rest = len([t for t in steps if t.strip()]) - len(out)
+    rest = len(items) - len(out)
     return '; '.join(out) + (f' (+{rest} more)' if rest > 0 else '')
 
 
@@ -4757,16 +4576,13 @@ def sibling_path(repo, branch, names=None):
 
     <parent> is the folder that holds the main checkout (also when repo is a linked worktree),
     <summary> is the plan title ("Add the cache" -> "Add-the-cache"); without one it is <Name>,
-    the branch with a capital first letter ("add-cache" -> "Add-cache"). The
-    [worktree] path key in the autopilot config changes the pattern; it knows {parent},
-    {repo}, {branch}, {Name}, {type}, {slug} and {summary}.
+    the branch with a capital first letter ("add-cache" -> "Add-cache").
     """
     code, common = run_quiet(['git', 'rev-parse', '--path-format=absolute', '--git-common-dir'],
                              cwd=repo)
     main = Path(common).parent if code == 0 and common and Path(common).name == '.git' \
         else Path(repo)
     safe = re.sub(r'[^A-Za-z0-9._-]+', '-', branch).strip('-') or 'run'
-    pattern = autopilot_config('worktree').get('path') or WORKTREE_PATH
     extra = {k: re.sub(r'[^A-Za-z0-9._-]+', '-', str(v)).strip('-')
              for k, v in (names or {}).items() if k in ('slug', 'type', 'summary') and v}
     name = safe[:1].upper() + safe[1:]
@@ -4774,11 +4590,8 @@ def sibling_path(repo, branch, names=None):
     extra.setdefault('type', 'feature')
     if not extra.get('summary'):
         extra['summary'] = name
-    try:
-        path = pattern.format(parent=main.parent, repo=main.name, branch=safe, Name=name, **extra)
-    except (KeyError, IndexError, ValueError):
-        path = WORKTREE_PATH.format(parent=main.parent, repo=main.name, branch=safe, Name=name,
-                                    **extra)
+    path = WORKTREE_PATH.format(parent=main.parent, repo=main.name, branch=safe, Name=name,
+                                **extra)
     path = re.sub(r'-{2,}', '-', path).replace('/-', '/').replace('-/', '/')
     path = Path(path).expanduser()
     return path if path.is_absolute() else main / path
@@ -4786,7 +4599,6 @@ def sibling_path(repo, branch, names=None):
 
 FIX_WORDS = re.compile(r'(?i)(?<![a-z])(fix|fixes|fixed|bug|bugs|bugfix|hotfix|regression|repair)(?![a-z])')
 BRANCH_PATTERN = '{type}/{slug}'
-PR_TITLE_PATTERN = '{summary}'
 
 
 def plan_heading(plan):
@@ -4809,19 +4621,14 @@ def run_names(repo, plan, branch=None, summary=None):
     """The branch and worktree folder for a run, after the naming convention.
 
     The default convention is {type}/{slug}: type is feature, or bugfix when the plan names a
-    fix, and slug is the plan file name without its date (feature/user-service). [worktree] branch and
-    path in the autopilot config change the patterns; they know {type}, {slug} and {summary}
-    (the plan title). A branch the user names wins over the pattern. A pattern with an
-    unknown placeholder falls back to the default convention and says so in `note`.
+    fix, and slug is the plan file name without its date (feature/user-service). A branch
+    the user names in the chat wins over the convention.
     """
-    cfg = autopilot_config('worktree')
     slug = plan_branch({'argv': ['ralphex'], 'target': str(plan)})
     title = plan_heading(plan) if plan else None
     summary = summary or title or slug
     values = {'slug': slug, 'type': change_type(slug, title),
               'summary': re.sub(r'[^A-Za-z0-9._-]+', '-', summary).strip('-')}
-    pattern = cfg.get('branch') or BRANCH_PATTERN
-    note = None
 
     def clean(name):
         name = re.sub(r'[^A-Za-z0-9._/-]+', '-', name)
@@ -4830,29 +4637,17 @@ def run_names(repo, plan, branch=None, summary=None):
     if branch:
         name = clean(branch) or slug
     else:
-        try:
-            name = clean(pattern.format(**values))
-        except (KeyError, IndexError, ValueError) as e:
-            note = f'[worktree] branch = {pattern} is not usable ({e}): used {BRANCH_PATTERN}'
-            name = clean(BRANCH_PATTERN.format(**values))
-        name = name or slug
+        name = clean(BRANCH_PATTERN.format(**values)) or slug
     path = sibling_path(repo, name, values)
     return {'branch': name, 'path': str(path), 'slug': slug, 'type': values['type'],
-            'summary': summary, 'pattern': pattern, 'note': note,
-            'custom': name != slug or bool(cfg.get('path'))}
+            'summary': summary, 'custom': name != slug}
 
 
 def pr_title(plan, branch):
-    """The pull request title after [worktree] pr_title (default the plan title, "{summary}")."""
+    """The pull request title: the plan title, else the plan slug or the branch."""
     slug = plan_branch({'argv': ['ralphex'], 'target': str(plan)}) if plan else branch
     summary = (plan_heading(plan) if plan else None) or slug
-    values = {'type': change_type(slug, summary), 'summary': summary, 'slug': slug,
-              'branch': branch}
-    pattern = autopilot_config('worktree').get('pr_title') or PR_TITLE_PATTERN
-    try:
-        return pattern.format(**values).strip() or summary
-    except (KeyError, IndexError, ValueError):
-        return PR_TITLE_PATTERN.format(**values)
+    return summary.strip() or branch
 
 
 def worktree_of(repo, branch):
@@ -5425,14 +5220,6 @@ def main(argv=None):
     s.set_defaults(fn=cmd_config_show)
     s = sub.add_parser('catalog')
     s.set_defaults(fn=cmd_catalog)
-    s = sub.add_parser('compact')
-    s.add_argument('--flow', required=True)
-    s.add_argument('--handoff', required=True, help='file the chat reads after the compaction')
-    s.add_argument('--focus', help='the /compact instructions (a default names the flow)')
-    s.set_defaults(fn=cmd_compact)
-    s = sub.add_parser('_compact')
-    s.add_argument('request')
-    s.set_defaults(fn=cmd_compact_helper)
     s = sub.add_parser('_supervise')
     s.add_argument('sdir')
     s.set_defaults(fn=cmd_supervise)

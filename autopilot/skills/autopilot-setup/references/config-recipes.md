@@ -27,7 +27,7 @@ repo/
 │   ├── .gitignore                written by ralphex (progress/, worktrees/)
 │   └── scripts/codex-agrouter.sh Codex through the router, committed, executable
 ├── .autopilot/
-│   └── config                    full commented template: [updates], [worktree], [timeouts], committed
+│   └── config                    full commented template: [timeouts] only, committed
 ├── .agrouter/
 │   ├── config                    full commented template: provider, quota prefix, CLIs, limits; no key, committed
 │   └── .gitignore                written by agrouter (logs/)
@@ -41,7 +41,7 @@ lives only in the user's global router config or the environment.
 | `~/.config/agrouter/config` (`AGROUTER_CONFIG_DIR`) | user | **API key** (and the provider, for repositories without their own config) |
 | `.agrouter/config` | repository | classifier provider, Codex quota prefix, disabled CLIs, limits for this project's docs. **Never a key.** |
 | `~/.config/autopilot/config` (`AUTOPILOT_CONFIG`) | user | personal response times |
-| `.autopilot/config` | repository | recommended plan review, publish mode (pull request by default), response times for this project |
+| `.autopilot/config` | repository | response times for this project (the only autopilot setting) |
 | `~/.config/ralphex/config` (`RALPHEX_CONFIG_DIR`) | user | personal defaults (often `plan_model`), notifications |
 | `.ralphex/config` | repository | command, executor, models, review tool, limit waiting |
 | `.ralphex/scripts/codex-agrouter.sh` (`.cmd` + `.py` on Windows) | repository | Codex wrapper |
@@ -58,7 +58,7 @@ show it and ask whether this repository inherits it or overrides it.
 ```
 AP config-init --tool ralphex                    # .ralphex/config from the runner's template
 AP config-init --tool agrouter                   # .agrouter/config from the router's template
-AP config-init --tool autopilot                  # .autopilot/config with every key and default
+AP config-init --tool autopilot                  # .autopilot/config with the response times
 AP config-init --tool agrouter --merge           # upgrade a hand-written file, keep its values
 AP config-set .ralphex/config <key> --value <v> --comment "<why>"
 AP config-set .agrouter/config <key> --section <name> --value <v> --comment "<why>"

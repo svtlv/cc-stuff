@@ -1,9 +1,47 @@
 # Response Times
 
 Every question autopilot asks has a recommended answer and a response time.
-When the time passes without a reply, the recommendation is taken, logged
-and the work continues. The time matches how long a careful answer takes
+Trivial questions get the recommendation at once. When the time of a
+critical question passes without a reply, the recommendation is taken,
+logged and the work continues. The time matches how long a careful answer takes
 and how costly a wrong default is.
+
+## Critical or Trivial
+
+Ask the user only the critical questions. Answer the trivial ones at once
+with the recommendation, so the flow does not stop on each small choice.
+
+```
+PROMPT ─► pick the recommendation ─► triage ─┬─ trivial  ─► answer now (--by agent) ─► post one ⏩ line
+                                             └─ critical ─► ask with the response time (table below)
+```
+**Note:** the triage happens after the recommendation is known. Only a
+critical prompt waits for the user.
+
+| Always critical: ask the user | Trivial: answer at once |
+|---|---|
+| The implement-or-stop decision (`decide`) | The plan draft: accept, or revise with the gaps found |
+| The architecture, the data model, a public API or a storage format | The plan review: which reviewer, which findings to apply |
+| A new dependency, a library or a service to use | A name: of a file, a class, a branch, a flag or a test |
+| Security, credentials, data loss, or changes to shared or remote state | A file location or a code style that the codebase already shows |
+| The scope: what is in or out, behavior the user sees | A choice the codebase, the task or an earlier answer settles |
+| Two or more good options with real trade-offs and no clear winner | Yes/no questions with one safe answer that keeps work moving |
+| A recommendation that goes against an earlier wish of the user | A runtime prompt with one safe answer |
+| Recovery steps, long rate limits, plan redesign, active sessions | Preflight: a worktree for a dirty tree, doc drift, a model-spec fix |
+| Free text without a safe default, and the plan to run (`plan_pick`) | |
+
+When in doubt, the question is critical. A trivial answer must be easy to
+change later: the user still sees the full plan at the `decide` step.
+
+To answer a trivial prompt:
+
+1. Register the recommendation as usual (`AP recommend ...`).
+2. Answer it: `AP answer <session> <answer flags> --by agent --reason
+   "trivial: <why>"`. For an agent-level question, act on it and log it with
+   `AP log <session> --kind decision --by agent --reason "trivial: <why>"`.
+3. Post one line: `⏩ <question, short> → <answer> (<why>)`. Do not ask
+   for a reply. A later wish of the user applies at the next chance ("Late
+   Replies").
 
 ## Policy
 

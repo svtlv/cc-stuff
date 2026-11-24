@@ -24,8 +24,8 @@ still work with the installed versions and fixed models.
 
 1. `cd` to the repository root and run `AP doctor --json --updates`. The
    `--updates` flag compares the installed ralphex.windows and agrouter with
-   their newest GitHub releases. The lookup runs at most once per
-   `[updates] check` interval (24h by default) and is cached, so most starts
+   their newest GitHub releases. The lookup runs at most once
+   in 24 hours and is cached, so most starts
    send no request.
 2. **`missing_tools` is not empty** (ralphex.windows or agrouter is not
    installed). List what is missing, in one line each, then ask one question:

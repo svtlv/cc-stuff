@@ -4,7 +4,7 @@ description: This skill should be used when the user runs "/autopilot-run" or "$
 argument-hint: "<plan file> [-- extra runner flags such as --tasks-only]"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, Agent, CronCreate, CronDelete
 metadata:
-  version: "0.9.0"
+  version: "0.10.0"
 ---
 
 # Autopilot Run
@@ -119,15 +119,16 @@ every task start and finish, review, commit and problem.
 
 Follow `monitoring.md`: loop on `AP next <session>`, in the way the host
 supports (`hosts.md`; Claude Code: background, Bash timeout 7200000 ms).
-Post its update lines as is ("Update Formats" in `monitoring.md`); the
-table says what to add or do on top.
+Post its update lines as is, in a `text` code block ("Update Formats" in
+`monitoring.md`). Never rewrite them into sentences: they carry the model,
+the effort and the `Plan:` line. The table says what to add or do on top.
 
 | Report | Response |
 |---|---|
 | `NO NEWS` | Post nothing; run `next` again. |
 | `task-start`, `task-done`, `phase-start`, `commit`, `error`, `restart` | The line only. |
 | `stalled` | The line, plus one sentence from the log's last lines on what it is stuck on. |
-| `PROMPT` | The runner needs input. Register a recommendation, relay the prompt verbatim with its auto-answer time (`runtime`, 10 min: the run is blocked meanwhile), answer with the user's reply ("Unattended Defaults"). |
+| `PROMPT` | The runner needs input. Register a recommendation and triage it ("Critical or Trivial" in `response-times.md`): answer a trivial one at once with `--by agent`; relay a critical one verbatim with its auto-answer time (`runtime`, 10 min: the run is blocked meanwhile), answer with the user's reply ("Unattended Defaults"). |
 | `auto-answered` | The line (what was chosen without a reply, and why). |
 | `limit` / `limit-cleared` | The line, with the reset as a clock time. See `limits.md`. |
 | `failed`, category `limit` | Reset is hours away: pick and recommend an option per "Long Limits" in `limits.md`; `ask-timer` with `--decision limit` (30 min). |
@@ -180,8 +181,9 @@ the watchdog cron job if one was made.
 
 Write all text for the user in ASD-STE100 Simplified Technical English:
 chat messages, questions, summaries, reports and the Note under each
-diagram. Do not apply it to code, identifiers, file paths, commands, quotes
-or error messages. Keep them exactly as they are.
+diagram. Do not apply it to code, identifiers, file paths, commands, quotes,
+error messages or the driver's update lines (`▶`, `✓`, `⚠`, `⏱` lines and
+their `Plan:`/`Done:` lines). Keep them exactly as they are.
 
 - Use one word for one meaning. Use simple, common words and keep the
   same technical name for the same thing.

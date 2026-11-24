@@ -65,7 +65,7 @@ does the waking, for any provider:
 run unwatched ≥ 10 min with news (task done, failure, question, end)
     │
     ├─ owner tab can be typed into ─► types one line into it ─► the agent reads a user message ─► reattach
-    │    (Orca tab, tmux, WezTerm, kitty, iTerm2, or a [wake] command)
+    │    (Orca tab, tmux, WezTerm, kitty or iTerm2)
     │
     └─ otherwise ─► desktop notification (macOS, Linux) ─► the user opens the chat ─► hook or skill ─► reattach
 ```
@@ -81,17 +81,11 @@ receiving it, follow "Reattach"; it is automation, not a user instruction.
 | Host or terminal | What wakes the chat after its limit |
 |---|---|
 | Any agent CLI in an Orca tab, tmux, WezTerm, kitty (remote control on) or iTerm2 | The typed wake line |
-| Any agent CLI in another terminal (Terminal.app, VS Code, Windows Terminal) | A `[wake] command` when the terminal has a "send text" CLI; otherwise the notification |
+| Any agent CLI in another terminal (Terminal.app, VS Code, Windows Terminal) | The notification |
 | Orca chat sessions | Orca's own "Continue where you left off" |
 | Claude Code, also | Optional watchdog cron (below) |
 
-Configure in `~/.config/autopilot/config` or `<repo>/.autopilot/config`:
-
-```ini
-[wake]
-mode = type        # type (default; falls back to notify), notify, off
-command = mytool send --text {text}   # any terminal not listed above
-```
+Waking is always on and is not configurable.
 
 The tab is recorded from the terminal's own variables (`ORCA_TERMINAL_HANDLE`,
 `TMUX_PANE`, `WEZTERM_PANE`, `KITTY_WINDOW_ID`, `ITERM_SESSION_ID`) by `run`

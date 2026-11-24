@@ -4,7 +4,7 @@ description: This skill should be used when the user runs "/autopilot-plan" or "
 argument-hint: "[task description | --redesign <file> | --review <file>] [-- extra runner flags]"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, Agent
 metadata:
-  version: "0.9.0"
+  version: "0.10.0"
 ---
 
 # Autopilot Plan
@@ -137,22 +137,29 @@ Handle each `PROMPT` in this fixed order, one prompt at a time:
 1. Pick one recommended answer (see below) and register it once:
    `AP recommend <session> ... --reason "..."`. Register again only when the
    user's words change it.
-2. Show the prompt in plain text with numbered options, the recommended one
-   marked, "or answer in your own words", and the auto-answer clock time
-   from the `PROMPT` line.
-3. Start `AP next <session>` again in the background and end the turn.
+2. Triage it per "Critical or Trivial" in `response-times.md`. A trivial
+   prompt (the draft, the plan review questions, a name, a choice the
+   codebase settles) gets the answer now: `AP answer <session> ... --by
+   agent --reason "trivial: <why>"`. Post one `⏩` line and go to step 5.
+3. Show a critical prompt in plain text with numbered options, the
+   recommended one marked, "or answer in your own words", and the
+   auto-answer clock time from the `PROMPT` line.
 4. On the user's reply, send `AP answer <session> ...`. Put feedback with
    quotes, `$` or backticks in a file and pass `--text-file <file>`.
+5. Start `AP next <session>` again in the background and end the turn.
 
 **`question`** — Pick the option that best fits the task and the codebase;
 read the relevant code briefly when the choice depends on it. Answer with
 `--choice N` or `--text`.
 
-**`draft`** — Read the `draft:` file once. Show a compact digest: the title,
-one line of overview, the task list as a table (task number, title, step
-count) and the validation commands. Give the file path for the full text.
-Recommend `accept`, or `revise` with the concrete gaps found (a missing
-requirement, a wrong file, no tests). The draft gets no review by another
+**`draft`** — Read the `draft:` file once. Recommend `accept`, or `revise` with
+the concrete gaps found (a missing requirement, a wrong file, no tests).
+The draft is trivial: answer it at once and post one `⏩` line with the
+title, the task count and the file path. Show the full digest and ask only
+when the draft is critical: it takes an approach the user did not agree
+to. The digest has the title, one line of
+overview, the task list as a table (task number, title, step count), the
+validation commands and the file path. The draft gets no review by another
 model: ralphex reviews the plan file after it is written.
 
 | Option | Answer |
@@ -179,6 +186,11 @@ in `../autopilot/references/reviews.md`:
   with `--text "1,3"`, a range such as `--text "2-4"`, `--text "All
   findings"` or `--text "None"`. The planner applies them and edits the
   plan file. The chat does not edit the plan.
+- Both questions are trivial ("Critical or Trivial" in `response-times.md`):
+  answer them at once. The `⏩` line for the findings names the numbers
+  applied and the numbers dropped, with a short why. Ask the user only when
+  a finding is critical: it changes the architecture, the scope or an
+  earlier wish of the user.
 - `• Plan review:` and `⚠ Plan review:` lines: post them. A warning ends
   the plan review. Ralphex keeps the plan as it was before that round, and
   planning goes on.
@@ -232,8 +244,8 @@ Do not start implementation from this skill.
 
 ## Rules
 
-- Answers come from the user, or from the registered recommendation after
-  its response time without a reply. When the user says "you decide", answer with
+- Answers come from the user, from the registered recommendation after
+  its response time without a reply, or at once for a trivial prompt. When the user says "you decide", answer with
   the recommendation using `--by agent --reason "..."`.
 - Keep one planning session per task. Never start a second `plan` while one
   is active for the same description.
@@ -243,8 +255,9 @@ Do not start implementation from this skill.
 
 Write all text for the user in ASD-STE100 Simplified Technical English:
 chat messages, questions, summaries, reports and the Note under each
-diagram. Do not apply it to code, identifiers, file paths, commands, quotes
-or error messages. Keep them exactly as they are.
+diagram. Do not apply it to code, identifiers, file paths, commands, quotes,
+error messages or the driver's update lines (`▶`, `✓`, `⚠`, `⏱` lines and
+their `Plan:`/`Done:` lines). Keep them exactly as they are.
 
 - Use one word for one meaning. Use simple, common words and keep the
   same technical name for the same thing.

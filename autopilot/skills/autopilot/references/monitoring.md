@@ -9,7 +9,7 @@ chat shows those lines, never a status on a schedule.
 ```
 start ─► AP next ─┬─► NO NEWS ─► post nothing ─────────────────────────┐
                   ├─► update lines ─► post each line as is ────────────┤
-                  ├─► PROMPT ─► recommend once, ask the user ──────────┤
+                  ├─► PROMPT ─► recommend once, triage, ask or answer ─┤
                   ├─► FAILED/LOST/stalled ─► recover ──────────────────┤
                   └─► DONE/STOPPED ─► final report                     │
            ▲                                                           │
@@ -66,7 +66,10 @@ are timed by the driver, so they fire even when the chat is idle:
      `revise` with that gap as feedback;
    - yes/no: the answer that keeps work safe and moving.
 2. Register it: `AP recommend <session> <answer flags> --reason "<one line why>"`.
-3. Ask in **plain text**, not a blocking question tool, so the monitor keeps
+   Then triage it ("Critical or Trivial" in `response-times.md`): answer a
+   trivial prompt now with `--by agent --reason "trivial: ..."`, post one
+   `⏩` line and skip steps 3–4.
+3. Ask a critical prompt in **plain text**, not a blocking question tool, so the monitor keeps
    running: question, numbered options, the recommended one marked, and the
    clock time of the auto-answer from the `PROMPT` line ("Asking" in
    `response-times.md`).
@@ -105,12 +108,18 @@ AP log <session> --kind fix --text "a1b2c3d: pin protobuf to 4.x" --reason "code
 
 ## Update Formats
 
-Post the update lines of `next` exactly as written, in order. Task updates
-have a second line: `Plan:` (the task's planned steps) on start, `Done:`
-(the ticked steps and the files the commit changed) on finish:
-the same event always reads the same way, so a run's chat is a clean
-timeline. Do not paraphrase `activity`, add "still working" lines or
-re-post the task list. A sample run:
+Post the update lines of `next` exactly as written, in order, inside one
+`text` code block per wake. Task updates have a second line: `Plan:` (a
+short phrase for each planned step) on start, `Done:` (the ticked steps
+and the files the commit changed) on finish. The same event always reads
+the same way, so a run's chat is a clean timeline.
+
+Never rewrite an update line into a sentence. Never shorten it or drop
+its model, effort, `how`, steps or `Plan:`/`Done:` line. The Output
+Language rules do not apply to these lines: they are driver output, like
+an error message. Add no text around the block, except a reply to the
+user or a decision. Do not paraphrase `activity`, add "still working"
+lines or post the task list again. A sample run:
 
 ```
 ▶ Task 1/13 started: Data model and schema migration · claude-opus-5-5 (xhigh) · chosen by agrouter · steps 0/67
