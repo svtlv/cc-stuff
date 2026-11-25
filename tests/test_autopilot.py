@@ -491,8 +491,11 @@ class AutopilotDriver(unittest.TestCase):
         self.assertIn('error', self.drive('plan-review', 'docs/plans/missing.md'))
         old = dict(self.env, AUTOPILOT_PLAN_REVIEW='0')
         self.assertIn('v1.7.0-windows.4', self.drive('plan-review', 'docs/plans/p.md', env=old)['error'])
-        self.assertTrue(any('has no plan review' in x for x in
-                            self.drive('doctor', '--json', env=old)['setup_incomplete']))
+        report = self.drive('doctor', '--json', env=old)
+        self.assertTrue(any('has no plan review' in x for x in report['setup_incomplete']))
+        # whether a retried review round keeps its session is reported, never a setup problem
+        self.assertIn('resumes', report['cli']['review_resume'])
+        self.assertFalse(any('session' in x for x in report['setup_incomplete']))
 
     def test_run_restarts_after_transient_failure(self):
         plan = self.repo / 'docs/plans/p.md'
@@ -1021,7 +1024,9 @@ class HostPortability(unittest.TestCase):
                     supervisor.log.close()
 
     def test_windows_pid_check_uses_the_pid_column(self):
+        # win_pid_alive answers on a real Windows host; None makes it fall back to tasklist
         with unittest.mock.patch.object(autopilot, 'WINDOWS', True), \
+                unittest.mock.patch.object(autopilot, 'win_pid_alive', return_value=None), \
                 unittest.mock.patch.object(autopilot, 'run_quiet') as listing:
             listing.return_value = (0, '"python.exe","1234","Console","1","123 K"')
             self.assertFalse(autopilot.pid_alive(123))
@@ -1296,7 +1301,7 @@ class Reconfigure(unittest.TestCase):
         self.env = dict(self.env, PATH=f"{fakebin}{os.pathsep}{self.env['PATH']}",
                         PROBE=str(probe), AGROUTER_CLASSIFIER_API_KEY='secret')
         out = self.ap('config-init', '--tool', 'agrouter')
-        self.assertEqual((out['file'], out['created']), ('.agrouter/config', True))
+        self.assertEqual((Path(out['file']), out['created']), (Path('.agrouter/config'), True))
         text = (self.repo / '.agrouter/config').read_text()
         self.assertIn('# timeout = 30s', text)
         self.assertNotIn('leaked', text)
@@ -2368,6 +2373,57 @@ class SupervisorUnits(unittest.TestCase):
         routed = dict(setup, routed={'claude': True, 'codex': True})
         self.assertEqual(autopilot.model_how(fallback, routed, 'implementing tasks', 'task iteration 1'),
                          'claude default (router fallback)')
+
+    def test_the_source_agrouter_reports_beats_the_config(self):
+        # agrouter v1.0.0 names the source of every field, so the config is no longer guessed from
+        sup, _ = self.run_supervisor('claude_command = agrouter\nreview_model = :high\n',
+                                     ['--task-model=opus:xhigh'])
+        events = lambda kind: [e for e in sup.state['events'] if e['kind'] == kind]
+        sel = lambda model, effort, ms, es: 'agrouter: selection: ' + json.dumps({
+            'cli': 'claude', 'model': model, 'effort': effort, 'effective': {
+                'model': {'value': model, 'source': ms}, 'effort': {'value': effort, 'source': es}}})
+        sup.scan_line('--- task iteration 1 ---')
+        sup.scan_line(sel('claude-opus-5-5', 'xhigh', 'native', 'native'))
+        sup.scan_line('--- claude review 0: all findings ---')
+        sup.scan_line(sel('claude-sonnet-5-5', 'high', 'router', 'native'))
+        # a wrapper passed a native model the config does not know about
+        sup.scan_line('--- claude review 1: critical/major ---')
+        sup.scan_line(sel('claude-sonnet-5-5', 'medium', 'native', 'router'))
+        task, phases = events('task-start')[0], events('phase-start')
+        self.assertEqual(task['how'], 'set by --task-model=opus:xhigh on the run')
+        self.assertEqual(task['model']['sources'], {'model': 'native', 'effort': 'native'})
+        self.assertEqual([p['how'] for p in phases], [
+            'model chosen by agrouter, effort set by review_model = :high in .ralphex/config',
+            # review_model pins only the effort; agrouter says the router chose it here
+            'model set by a runner argument, effort chosen by agrouter'])
+        left = {'cli': 'claude', 'model': 'claude-opus-5-5', 'effort': None,
+                'sources': {'model': 'router', 'effort': 'child_default_unknown'},
+                'defaults': {'effort': {'value': None, 'source': 'child_default_unknown'}}}
+        self.assertEqual(autopilot.model_how(left, sup.setup, 'implementing tasks', 'task 1'),
+                         'model chosen by agrouter, effort claude default (agrouter left it to claude)')
+
+    def test_review_rounds_resume_only_through_the_real_clis(self):
+        new, old = (1, 7, 0, 5), (1, 7, 0, 4)
+        routed = {'claude_command': 'agrouter',
+                  'claude_args': 'exec claude --doc=CLAUDE.md -- --dangerously-skip-permissions'}
+        cases = [
+            (new, {}, 'claude', True),
+            (new, {'claude_command': 'C:\\bin\\claude.cmd'}, 'claude', True),
+            (new, routed, 'claude', True),
+            (new, dict(routed, claude_args='exec codex -- x'), 'claude', False),
+            (new, dict(routed, claude_args=routed['claude_args'] + ' --no-session-persistence'),
+             'claude', False),
+            (new, {'claude_command': '.ralphex/scripts/codex-as-claude.sh'}, 'claude', False),
+            (new, {'codex_command': '/usr/local/bin/codex'}, 'codex', True),
+            (new, {'codex_command': '.ralphex/scripts/codex-agrouter.sh'}, 'codex', False),
+            (old, routed, 'claude', False),
+            (None, routed, 'claude', None),
+        ]
+        for version, cfg, executor, want in cases:
+            with self.subTest(cfg=cfg, executor=executor, version=version):
+                got = autopilot.review_resume(version, cfg, executor)
+                self.assertIs(got['resumes'], want)
+                self.assertEqual(got['reason'] is None, want is True)
 
     def test_a_restart_drops_the_open_prompt_and_its_recommendation(self):
         choice = {'kind': 'choice', 'question': 'Pick', 'options': ['A', 'B'], 'free_text': False}

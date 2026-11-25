@@ -58,7 +58,8 @@ Run `AP doctor --json --latest` from the repository root. Show a status table:
 | Item | Installed | Latest | Action |
 |---|---|---|---|
 | Plan runner | `cli.version`, `cli.plan_review` | `latest.cli` | install / upgrade / ok (upgrade when `cli.plan_review` is false: v1.7.0-windows.4 adds the plan review) |
-| Model router | `router.version` | `latest.router` | install / upgrade / ok |
+| Review session resume | `cli.review_resume` | — | yes / no + `reason` (information only; v1.7.0-windows.5 adds it) |
+| Model router | `router.version`, `router.field_sources` | `latest.router` | install / upgrade / ok (offer the upgrade when `router.field_sources` is false: v1.0.0 names who set each field) |
 | claude / codex CLIs | `reviews.claude`, `reviews.codex` | — | usable / missing / logged out / disabled |
 | Classifier key | `router_config.key_set` (+ provider) | — | set / missing |
 | Repo configs | `cli_config.local_exists`, `router_config.local_exists`, `autopilot_config.local_exists`, `uses_router` | — | configured / missing (per file) |

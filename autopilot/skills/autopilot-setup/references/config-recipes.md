@@ -106,6 +106,12 @@ external Codex review go through the router.
 native Claude flags the runner needs. `claude_args` cannot glob, so list
 every doc explicitly; the wrapper globs its `--doc-dirs` itself.
 
+Keep `exec claude` as the first two words of `claude_args`, and never add
+`--no-session-persistence`. ralphex.windows v1.7.0-windows.5 resumes a
+retried review round only for `claude` or for `agrouter` with `exec
+claude` first. Any other form starts the round again with the full prompt.
+The Codex wrapper never resumes: routing has priority over the resume.
+
 Empty `codex_model`/`codex_reasoning_effort` are required for routing: the
 runner's own defaults would otherwise pin both.
 

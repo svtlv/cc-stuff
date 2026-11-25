@@ -143,6 +143,11 @@ lines or post the task list again. A sample run:
 model and effort and who chose them: "chosen by agrouter", "set by
 <key> = <spec> in <config file>" (or a run flag), or the CLI default. When
 the model and the effort have different sources, the line names both.
+agrouter v1.0.0 or newer names the source of each field on every selection
+(`effective.<field>.source`: `router`, `native`, or a CLI default).
+Autopilot uses that source first. A `native` field shows the config key or
+run flag that sets it, or "set by a runner argument" when no key does.
+With an older agrouter, autopilot reads the source from the runner config.
 Autopilot takes the model and effort of every step from agrouter's log
 (`<log_dir>/agrouter.log`). The runner's output is only a fallback: it
 hides agrouter's line for Codex and prints the Codex banner once. A task

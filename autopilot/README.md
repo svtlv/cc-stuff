@@ -61,7 +61,8 @@ a waiting chat costs no tokens.
 | You want to skip the external review | Say so: before the run it starts without it; during the run it ends the review at once (ralphex's manual break) or as soon as the review starts. |
 | Plan review | ralphex reviews the plan itself after it writes it (ralphex.windows v1.7.0-windows.4 or newer). It asks which reviewer to use: External reviewer (Codex in the Claude setup), Same agent (read-only), or Skip review. Autopilot relays the question with a recommendation (External reviewer by default, Same agent when ralphex does not offer it) and takes it after 10 minutes without a reply. You see each finding with an assessment and pick which to apply (after 15 minutes: the critical and major ones). The ralphex planner then edits the plan. Drafts are not reviewed by another model, so planning stays one question at a time. `/autopilot-plan --review <file>` reviews an existing plan the same way. |
 | Where the implementation runs | Autopilot checks the checkout first. When you planned on the default branch, it recommends a new worktree in the shared workspaces folder (`~/Projects/workspaces/<repo>/<Summary>`, named after the plan title; an existing worktree for the branch is reused, whatever tool made it), so your checkout never switches branch and stays free for more planning. The plan, the repository configs and every file changed during the flow move there in one commit, and your checkout gets those files back as committed. Files you changed before the flow stay in your checkout. When you are already in a worktree or on a feature branch, it recommends staying there, because ralphex makes worktrees only from the default branch. No reply in 60 minutes means the recommended place. A plans folder in `.gitignore` stops the run with a message: plans are committed with the run. |
-| Which model runs each step | Every task and review line names the model, the effort and who chose them: agrouter, a config key (for example `review_model = :high in .ralphex/config`), a run flag, or the CLI default. The model and effort come from agrouter's log (`.agrouter/logs/agrouter.log`) for every step; ralphex's output is only a fallback. The final report has the same data per step. |
+| Which model runs each step | Every task and review line names the model, the effort and who chose them: agrouter, a config key (for example `review_model = :high in .ralphex/config`), a run flag, or the CLI default. The model and effort come from agrouter's log (`.agrouter/logs/agrouter.log`) for every step; ralphex's output is only a fallback. agrouter v1.0.0 or newer says who set each field, and autopilot uses that before the config. The final report has the same data per step. |
+| A review round is retried | ralphex.windows v1.7.0-windows.5 or newer keeps one session per review round. After a rate-limit wait, a transient API error or a session timeout, the round continues that session and does not repeat its research. This works for `claude`, `agrouter exec claude` and plain `codex`. A Codex review through the router wrapper, and a restarted ralphex, start the round again. `/autopilot-setup` shows which applies to your repository. |
 | Branch, folder and pull request names | Autopilot follows a convention and never asks for a ticket. The branch is `{type}/{slug}`: `feature/user-service`, or `bugfix/login-timeout` when the plan names a fix. The pull request title is the plan title, for example `Add the user service`. The convention is fixed. To use one specific name for a run, say it in the chat. Autopilot shows the names in the decide question. |
 | A long step | Every 30 minutes without news, a step gets a "still running" line with the time since the last output and since the agent last wrote its transcript. A run is stalled only when both are old. |
 | Only Codex is available | Setup recommends Codex. Under the Codex executor, ralphex offers no External reviewer, so the plan review is a same-agent review. Claude availability includes login and router checks. A Claude-configured session can fall back to Codex when its sandbox and routing support execution; otherwise setup explains what to change. |
@@ -151,8 +152,8 @@ scripts are never overwritten without asking.
 | Need | For |
 |---|---|
 | Python 3.9+, git | the driver |
-| `ralphex.windows` or `ralphex` | planning and execution |
-| `agrouter` + classifier key | model routing (optional: runs work with fixed models too) |
+| `ralphex.windows` or `ralphex` (v1.7.0-windows.5+ recommended) | planning and execution; v1.7.0-windows.4 adds the plan review, v1.7.0-windows.5 the review session resume |
+| `agrouter` (v1.0.0+ recommended) + classifier key | model routing (optional: runs work with fixed models too); v1.0.0 names who set each model and effort |
 | `claude` and/or `codex` CLI, logged in | the models doing the work |
 | [code-explainer](../code-explainer/) (optional) | the plan report in the full run and the "what was done" bullets in the final report; a compact built-in summary is used without it |
 
@@ -213,4 +214,5 @@ other way round.
   hooks or `/autopilot-run` pick it up in the next chat in the repository.
 - Restarts rely on the runner resuming from the first unchecked task. A run
   in a new worktree restarts in place in its folder; the folder is kept
-  after the run until you remove it.
+  after the run until you remove it. A restart also starts the current
+  review round again: ralphex keeps review sessions only in memory.

@@ -119,6 +119,10 @@ REVIEW_APPLY_Q = 'Which findings should be applied?'
 REVIEW_EXTERNAL, REVIEW_SAME, REVIEW_SKIP = 'External reviewer', 'Same agent', 'Skip review'
 REVIEW_ALL, REVIEW_NONE = 'All findings', 'None'
 PLAN_REVIEW_MIN = (1, 7, 0, 4)
+# a retried review round resumes its own session (ralphex.windows v1.7.0-windows.5+)
+REVIEW_RESUME_MIN = (1, 7, 0, 5)
+# agrouter names the source of each field (effective.*.source) on every selection (v1.0.0+)
+ROUTER_SOURCES_MIN = (1, 0, 0)
 # "  2. MAJOR: Task 3 - text" under "plan review findings:" (the indent is gone after clean_line)
 REVIEW_FINDING_RE = re.compile(r'^(\d+)\.\s+(CRITICAL|MAJOR|MINOR):\s*(.*)$')
 # lines that end the findings list: a section, the questions, a menu, the answer prompt
@@ -865,7 +869,7 @@ def install_via(path):
     if not path:
         return None
     where, real = Path(path), str(Path(path).resolve()).replace('\\', '/')
-    if '/Caskroom/' in real or '/Cellar/' in real or str(where).startswith(
+    if '/Caskroom/' in real or '/Cellar/' in real or where.as_posix().startswith(
             ('/opt/homebrew/', '/home/linuxbrew/')):
         return 'brew'
     gobin = os.environ.get('GOBIN') or Path(os.environ.get('GOPATH') or Path.home() / 'go') / 'bin'
@@ -1525,6 +1529,42 @@ def runner_has_plan_review(cli):
     return None if version is None else version >= PLAN_REVIEW_MIN
 
 
+def base_command(command):
+    """'claude' from '/usr/bin/claude', 'C:\\bin\\claude.cmd' or an empty command (the default)."""
+    name = re.split(r'[\\/]', (command or '').strip())[-1]
+    return re.sub(r'(?i)\.(exe|cmd|bat)$', '', name)
+
+
+def review_resume(version, cfg, executor='claude'):
+    """Whether a retried review round resumes its session: {'resumes', 'reason'}.
+
+    The runner (v1.7.0-windows.5+) keeps one session per review round in memory and resumes it
+    on a rate-limit wait, a transient retry or a session timeout. It does so only for the real
+    CLIs: claude, agrouter with "exec claude" first in claude_args, and codex. A wrapper starts
+    a new session with the full prompt, and so does --no-session-persistence. A restarted
+    runner always starts the round again. resumes is None when the runner version is unknown.
+    """
+    if version is None:
+        return {'resumes': None, 'reason': 'the runner version is unknown'}
+    if tuple(version) < REVIEW_RESUME_MIN:
+        return {'resumes': False, 'reason': 'the runner is older than v1.7.0-windows.5'}
+    if executor == 'codex':
+        name = base_command(cfg.get('codex_command'))
+        if name in ('', 'codex'):
+            return {'resumes': True, 'reason': None}
+        return {'resumes': False, 'reason': f'codex_command runs {name}, not codex: routed Codex '
+                                            'review rounds start a new session on a retry'}
+    args = (cfg.get('claude_args') or '').split()
+    if '--no-session-persistence' in args:
+        return {'resumes': False, 'reason': 'claude_args has --no-session-persistence'}
+    name = base_command(cfg.get('claude_command'))
+    if name in ('', 'claude') or (name == ROUTER and args[:2] == ['exec', 'claude']):
+        return {'resumes': True, 'reason': None}
+    if name == ROUTER:
+        return {'resumes': False, 'reason': 'claude_args does not start with "exec claude"'}
+    return {'resumes': False, 'reason': f'claude_command runs {name}, not claude or agrouter'}
+
+
 def review_capability(repo, cfg=None):
     """What can review here: the runner's external code review and autopilot's plan review."""
     cfg = cfg if cfg is not None else merged(cli_config_paths(repo)).get('', {})
@@ -1736,6 +1776,14 @@ def cmd_doctor(args):
         if info['cli']['plan_review'] is False:
             incomplete.append(f"{info['cli']['name']} {info['cli']['version']} has no plan review "
                               '(v1.7.0-windows.4 or newer): upgrade it with autopilot-setup')
+        info['cli']['review_resume'] = review_resume(
+            runner_version(info['cli']['version']), cfg, executor)
+    if info['router']['path']:
+        version = runner_version(info['router']['version'])
+        # older routers name the source only for a value left to the CLI: the rest is rebuilt
+        # from the runner config
+        info['router']['field_sources'] = None if version is None else \
+            version[:3] >= ROUTER_SOURCES_MIN
     if info['router']['path'] and not info['router_config']['key_set']:
         incomplete.append('classifier API key is not set')
     apaths = autopilot_config_paths(repo)
@@ -2115,7 +2163,7 @@ def cmd_run(args):
         os.chdir(wt['path'])
         plan = Path(wt['plan']).resolve().relative_to(Path(wt['path']).resolve())
         extra = {'source_repo': repo, 'worktree': wt}
-    start_session('run', str(plan), cli_args, args.max_restarts, args.flow, extra)
+    start_session('run', plan.as_posix(), cli_args, args.max_restarts, args.flow, extra)
 
 
 # ---------------------------------------------------------------- supervisor
@@ -2561,9 +2609,13 @@ class Supervisor:
             self.step['selected'] = True  # an agrouter selection line: the router ran this step
         # a value agrouter left to the CLI: record what the CLI really runs with, and why
         effective = sel.get('effective') or {}
-        defaults = {}
+        defaults, sources = {}, {}
         for field in ('model', 'effort'):
             eff = effective.get(field)
+            if isinstance(eff, dict) and eff.get('source'):
+                # router, native, verified_child_default or child_default_unknown (agrouter v1.0.0+
+                # names it for every field; older ones only for a value left to the CLI)
+                sources[field] = eff['source']
             if model[field] is None and eff:
                 model[field] = eff.get('value')
                 defaults[field] = {'value': eff.get('value'), 'source': eff.get('source'),
@@ -2576,6 +2628,8 @@ class Supervisor:
                                  'message': reason.get('message'), 'defaults': defaults}
         elif defaults:
             model['defaults'] = defaults  # routing worked and left these to the CLI on purpose
+        if sources:
+            model['sources'] = sources
         if (sel.get('readiness') or {}).get('excluded'):
             model['excluded'] = sel['readiness']['excluded']
         self.state['model'] = model
@@ -3800,9 +3854,12 @@ def step_pins(setup, phase, section):
 def model_how(model, setup, phase, section, selected=False):
     """Who chose the step's model and effort: 'chosen by agrouter', 'set by <config>', ...
 
-    Per field: a config spec that fixes it wins (agrouter only passes it on); else agrouter
-    when the CLI runs through it; else the CLI's own default. A router fallback is the CLI
-    default. Fields with the same source are said once.
+    Per field: the source agrouter reported (effective.<field>.source) wins: "router" is
+    agrouter's choice, "native" a runner argument (named by the config spec that sets it), a
+    child default the CLI's. Without a reported source the answer is rebuilt from the config:
+    a spec that fixes the field wins (agrouter only passes it on); else agrouter when the CLI
+    runs through it; else the CLI's own default. A router fallback is the CLI default. Fields
+    with the same source are said once.
     """
     if not setup:
         return None
@@ -3813,9 +3870,19 @@ def model_how(model, setup, phase, section, selected=False):
     routed = setup['routed'].get(cli) or selected
     fallback = set((model.get('fallback') or {}).get('fields') or [])
     left = set((model.get('defaults') or {}))
+    sources = model.get('sources') or {}
     how = {}
     for field in ('model', 'effort'):
-        if pins[field]:
+        source = sources.get(field)
+        if source == 'router':
+            how[field] = 'chosen by agrouter'
+        elif source == 'native':
+            how[field] = f'set by {pins[field]}' if pins[field] else 'set by a runner argument'
+        elif source and field in fallback:
+            how[field] = f'{cli} default (router fallback)'
+        elif source:
+            how[field] = f'{cli} default (agrouter left it to {cli})'
+        elif pins[field]:
             how[field] = f'set by {pins[field]}'
         elif field in fallback:
             how[field] = f'{cli} default (router fallback)'

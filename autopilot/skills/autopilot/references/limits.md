@@ -23,6 +23,11 @@ run is never mistaken for a hung or failed one, and never waited on twice.
 the exact step and keeps the run's context. That is why the driver adds
 `--wait=900s` whenever `wait_on_limit` is not configured.
 
+From ralphex.windows v1.7.0-windows.5, a review round that waits on a
+limit continues its own session after the wait. It does not repeat its
+research. A restart by the supervisor starts a new runner, which starts
+the review round again. See `reviews.md` for when the session continues.
+
 ## What the Driver Reports
 
 | Field / event | Meaning |

@@ -71,6 +71,43 @@ finished tasks are kept either way.
 Tell the user every skip in one line and include it in the final report:
 a run without the external review has had one check fewer.
 
+## Code Review Rounds Keep Their Session
+
+ralphex.windows v1.7.0-windows.5 or newer gives each code review round
+one session. When the round is retried in the same runner process, it
+continues that session with a short "continue" prompt. It does not repeat
+the research it did before.
+
+```
+review round N ─► session S (full prompt)
+     ├─ rate-limit wait, transient API error ─► resume S ("continue") ─► ...
+     ├─ session timeout ─► resume S once ─► second timeout ─► new session, full prompt
+     ├─ HEAD moved (the round committed) ─► new session, full prompt
+     └─ runner exits ─► autopilot restarts the runner ─► review round again, new session
+next round (N+1) ─► new session
+```
+**Note:** the session id lives only in the runner's memory. An in-place
+retry keeps the context; a restart by autopilot loses it. This is one more
+reason why autopilot adds `--wait` and lets the runner retry first.
+
+`doctor` reports `cli.review_resume` (`resumes`, `reason`) for the
+configured executor:
+
+| Configuration | Resumes |
+|---|---|
+| `claude_command = claude` (or empty) | yes |
+| `claude_command = agrouter`, `claude_args` starts with `exec claude` | yes |
+| `claude_args` has `--no-session-persistence` | no |
+| Another `claude_command` wrapper | no |
+| `executor = codex`, `codex_command = codex` | yes |
+| `executor = codex` through `.ralphex/scripts/codex-agrouter.sh` | no: routing has priority |
+| Runner older than v1.7.0-windows.5 | no |
+
+The runner prints nothing when it resumes a session. Do not report a
+resume as a restart. Never trade routing for the resume without the
+user. When the user asks why a retried Codex review repeated its research,
+explain the wrapper limit from this table.
+
 ## Plan Review
 
 Ralphex reviews the plan itself (ralphex.windows v1.7.0-windows.4 or
