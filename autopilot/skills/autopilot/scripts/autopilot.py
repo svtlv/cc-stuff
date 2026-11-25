@@ -865,18 +865,25 @@ UPDATE_RETRY = 3600       # a failed lookup (offline, GitHub limit) is retried a
 
 
 def install_via(path):
-    """How a tool was installed, from where it lives: brew, go, script or None (unknown)."""
+    """How a tool was installed, from where it lives: brew, package, script, go or None (unknown).
+
+    brew, package (.deb/.rpm in /usr/bin) and script (the release installers) are the
+    supported ways; go marks an old `go install` copy that setup replaces."""
     if not path:
         return None
     where, real = Path(path), str(Path(path).resolve()).replace('\\', '/')
     if '/Caskroom/' in real or '/Cellar/' in real or where.as_posix().startswith(
             ('/opt/homebrew/', '/home/linuxbrew/')):
         return 'brew'
+    if where.parent.as_posix() == '/usr/bin':
+        return 'package'
+    local = os.environ.get('LOCALAPPDATA')
+    if where.parent == Path.home() / '.local/bin' or (
+            local and where.parent.parent == Path(local) / 'Programs'):
+        return 'script'
     gobin = os.environ.get('GOBIN') or Path(os.environ.get('GOPATH') or Path.home() / 'go') / 'bin'
     if where.parent == Path(gobin):
         return 'go'
-    if where.parent == Path.home() / '.local/bin':
-        return 'script'
     return None
 
 
@@ -1708,7 +1715,7 @@ def cmd_doctor(args):
         'cli': tool_info(cli) if cli else {'path': None, 'version': None},
         'router': tool_info(ROUTER),
         'tools': {n: bool(shutil.which(n)) for n in
-                  ('claude', 'codex', 'go', 'brew', 'gh', 'git', 'fzf')},
+                  ('claude', 'codex', 'brew', 'apt', 'dnf', 'gh', 'git', 'fzf')},
         'repo': repo,
     }
     if cli:

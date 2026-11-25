@@ -4,7 +4,7 @@ description: This skill should be used when the user runs "/autopilot-setup" or 
 argument-hint: "[tools | key | repo | reconfigure] (default: all, or reconfigure when the repository is already set up)"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion
 metadata:
-  version: "0.10.0"
+  version: "0.11.0"
 ---
 
 # Autopilot Setup
@@ -89,14 +89,18 @@ available as `repo` (Stage 4 asks to keep or replace each existing value).
 
 ## Stage 2 — Install or Upgrade
 
-Follow `install.md` for the platform (`doctor.os`). Upgrade a tool the way
-it was installed (`cli.via`, `router.via`: `brew`, `go` or `script`), so
-the copy first on `PATH` changes. For a new install, prefer Homebrew on
-macOS when `brew` exists, the installer script on Linux, the PowerShell
-installer on Windows, and `go install` as the fallback. When
-`doctor --updates` lists `other_copies`, name them and offer to remove the
-older copy, so a `PATH` change later cannot bring it back. The router needs Go 1.27+;
-check `go version` first and offer to install Go when missing.
+Follow `install.md` for the platform (`doctor.os`). Use only the native
+way of the operating system: the Homebrew cask on macOS, the `.deb` or
+`.rpm` release package on Linux, and the PowerShell installer on Windows.
+The installer script (`~/.local/bin`) is the fallback without a package
+manager. Never use `go install`; neither tool needs Go.
+
+Upgrade a tool the way it was installed (`cli.via`, `router.via`: `brew`,
+`package` or `script`), so the copy first on `PATH` changes. When `via` is
+`go`, install the native way and offer to remove the old Go copy ("Replacing
+a Go Copy" in `install.md`). When `doctor --updates` lists `other_copies`,
+name them and offer to remove the older copy, so a `PATH` change later
+cannot bring it back.
 
 After installing, rerun `doctor` and confirm the versions. When the command
 is still not found, fix `PATH` as `install.md` describes.

@@ -109,9 +109,11 @@ day.
 Run `/autopilot:autopilot-setup` (or `$autopilot-setup`) directly. It walks through:
 
 1. **Check** — installed and latest versions, configs, key presence.
-2. **Install or upgrade** — `ralphex.windows` via Homebrew, the install
-   script, the Windows installer or `go install`; `agrouter` via
-   `go install` (Go 1.27+).
+2. **Install or upgrade** — `ralphex.windows` and `agrouter` the native
+   way of the operating system: the Homebrew cask on macOS, the `.deb` or
+   `.rpm` release package on Linux, the PowerShell installer on Windows
+   (the install script as a fallback). No Go is needed; an old
+   `go install` copy is replaced.
 3. **Classifier and key** — TypeSafe (default) or OpenAI. The key goes
    into `~/.config/agrouter/config` with user-only permissions, never into
    the repository.

@@ -1647,9 +1647,13 @@ class ToolUpdates(unittest.TestCase):
         self.assertEqual(autopilot.install_via('/opt/homebrew/bin/ralphex.windows'), 'brew')
         self.assertEqual(autopilot.install_via(str(Path.home() / '.local/bin/ralphex.windows')),
                          'script')
+        self.assertEqual(autopilot.install_via('/usr/bin/agrouter'), 'package')
+        with unittest.mock.patch.dict(os.environ, {'LOCALAPPDATA': '/appdata'}):
+            self.assertEqual(autopilot.install_via(
+                str(Path('/appdata/Programs/ralphex/ralphex.windows.exe'))), 'script')
         with unittest.mock.patch.dict(os.environ, {'GOBIN': '/gobin'}):
             self.assertEqual(autopilot.install_via('/gobin/agrouter'), 'go')
-        self.assertIsNone(autopilot.install_via('/usr/bin/agrouter'))
+        self.assertIsNone(autopilot.install_via('/usr/local/bin/agrouter'))
         self.assertEqual(autopilot.version_tag('ralphex v1.7.0-windows.4'), 'v1.7.0-windows.4')
 
 
