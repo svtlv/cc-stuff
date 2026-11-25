@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -34,6 +35,7 @@ class HostCompatibility(unittest.TestCase):
         self.previous = Path.cwd()
         os.chdir(self.root)
         self.addCleanup(os.chdir, self.previous)
+        self.host_env = os.environ.copy()
         env = patch.dict(os.environ, {}, clear=True)
         env.start()
         self.addCleanup(env.stop)
@@ -171,14 +173,26 @@ class HostCompatibility(unittest.TestCase):
                     self.assertNotIn('write_stdin', seed)
 
     def test_hook_entrypoint_resolves_both_plugin_root_variables(self):
-        env = dict(os.environ, PATH=os.defpath)
+        python_dir = str(Path(sys.executable).parent)
+        if os.name == 'nt':
+            # A bare 'bash' can start WSL instead of Git Bash on Windows.
+            git = shutil.which('git', path=self.host_env.get('PATH', os.defpath))
+            self.assertIsNotNone(git, 'Git for Windows is required for this test')
+            bash = next((root / 'bin/bash.exe' for root in Path(git).resolve().parents
+                         if (root / 'bin/bash.exe').is_file()), None)
+            env = {'PATH': python_dir, 'SYSTEMROOT': self.host_env['SYSTEMROOT'],
+                   'USERPROFILE': str(self.root)}
+        else:
+            bash = shutil.which('bash', path=os.defpath)
+            env = {'PATH': os.pathsep.join((python_dir, os.defpath))}
+        self.assertIsNotNone(bash, 'Bash is required for this test')
         for key in ('PLUGIN_ROOT', 'CLAUDE_PLUGIN_ROOT'):
             with self.subTest(key=key):
-                result = subprocess.run(['bash', str(ROOT / 'partner-agents/hooks/hook.sh'),
+                result = subprocess.run([str(bash), str(ROOT / 'partner-agents/hooks/hook.sh'),
                                          'hook-stop'], input='{}', text=True,
                                         capture_output=True,
                                         env={**env, key: str(ROOT / 'partner-agents')})
-                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertEqual(json.loads(result.stdout), {})
 
     def test_claude_background_wait_preserves_open_turn(self):
