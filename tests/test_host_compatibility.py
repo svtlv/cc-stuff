@@ -180,7 +180,8 @@ class HostCompatibility(unittest.TestCase):
             self.assertIsNotNone(git, 'Git for Windows is required for this test')
             bash = next((root / 'bin/bash.exe' for root in Path(git).resolve().parents
                          if (root / 'bin/bash.exe').is_file()), None)
-            env = {'PATH': python_dir, 'SYSTEMROOT': self.host_env['SYSTEMROOT']}
+            env = {'PATH': python_dir, 'SYSTEMROOT': self.host_env['SYSTEMROOT'],
+                   'USERPROFILE': str(self.root)}
         else:
             bash = shutil.which('bash', path=os.defpath)
             env = {'PATH': os.pathsep.join((python_dir, os.defpath))}
