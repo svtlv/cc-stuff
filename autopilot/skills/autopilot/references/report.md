@@ -17,8 +17,10 @@ AP report --flow <flow>
 ```
 
 returns every session of the flow (plan, runs, recovery runs) with status,
-duration, attempts, restarts, errors, `task_log`, `router_fallbacks` and
-`models_used`; the full decision log in time order; `without_user`, every
+duration, attempts, restarts, errors, `task_log`, `router_fallbacks`,
+`models_used` and `router_log` (every selection agrouter wrote to its log
+during the session: time, `section`, `phase`, `task`, `model`, `how`,
+`fallback`); the full decision log in time order; `without_user`, every
 decision that the user did not make (by `auto`, `agent`, `autopilot`,
 `agrouter` or `ralphex`; user answers and notes are not in it);
 `timeouts`, the subset taken on a timeout; and, on the run's branch, the
@@ -84,17 +86,27 @@ plan file path.
 
 **What was done:** the `summarize` bullets for the branch changes, with
 links to the code. Then the plan tasks as a table:
-| Task | Status ✓/✗/– | What was done | Model | Minutes | Commit |
-Then the review steps as a second table, from the session's `steps`
-(phases other than "implementing tasks"):
+| Task | Status ✓/✗/– | What was done | Model and effort | Chosen by | Minutes | Commit |
+Then the review steps as a second table (phases other than "implementing
+tasks"):
 | Step | Model and effort | Chosen by |
-Give "Chosen by" from `how` for every row: agrouter, the config key and
-file, a run flag, or the CLI default. A row with "not reported" says so;
-never guess a model. Take the task table's last four columns from each
-run session's `task_log`; add `how` from the task's `task-start` step in
-`steps` to its Model cell: "What was
-done" is `did` and `changes` (shorten to one line), or `about` with "not
-finished" for a task that did not end.
+
+Take every model, effort and "Chosen by" only from `router_log.selections`:
+agrouter's own log is the one complete record (the chat lines and `steps`
+can miss a step). Match a task by `task`, a review step by `section`. A
+step with more than one selection (a retry after a rate limit, a later
+iteration) lists each distinct model in time order, for example
+"claude-opus-5-5 (high), then claude-sonnet-5-5 (high) after the limit".
+"Chosen by" is `how`: agrouter, the config key and file, a run flag, or the
+CLI default; a selection with `fallback` says "router fallback" and why.
+A step with no selection says "no agrouter selection logged"; never guess
+a model. Only when `router_log.found` is false (no agrouter, or no
+`log_dir`) take the models from `task_log` and `steps`, and say once
+"models from the runner output: agrouter log not found".
+
+Take Status, Minutes and Commit from each run session's `task_log`. "What
+was done" is `did` and `changes` (shorten to one line), or `about` with
+"not finished" for a task that did not end.
 
 ## 3. Open items
 Only items that need the user: failed or skipped tasks, problems that

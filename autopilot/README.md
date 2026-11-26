@@ -89,7 +89,10 @@ The plugin ships `UserPromptSubmit` and `Stop` hooks (`hooks/hooks.json`,
 the schema Claude Code and Codex share). They print nothing unless a run in
 the repository has no chat watching it, or ended without a report. Then they
 tell the chat, and keep the chat that started the run from ending its turn
-without a watcher. Codex runs them after you trust them in its hook review.
+without a watcher. The `Stop` hook also holds that chat back once when an
+update line (with the model, effort and who chose them) that `AP next` gave
+it is not in the last message of the turn: only that message stays in the
+chat history. Codex runs them after you trust them in its hook review.
 Hosts without hooks still get the typed wake line. See
 [control.md](skills/autopilot/references/control.md).
 

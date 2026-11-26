@@ -21,13 +21,31 @@ chat once. "NO NEWS" comes only when the timeout passes.
 
 | Host capability (`hosts.md`) | How to run `next` |
 |---|---|
-| Background command with completion notice (Claude Code) | Run `AP next <session>` with `run_in_background` and the Bash `timeout` at 7200000 ms. Post the lines, end the turn, and continue when the notice arrives. The user can talk in between. |
+| Background command with completion notice (Claude Code) | Run `AP next <session>` with `run_in_background` and the Bash `timeout` at 7200000 ms. On the notice: read the output, start the next `AP next`, then post the lines as the last message and end the turn. The user can talk in between. |
 | Async process polling (Codex) | Start `AP next <session>`, poll that process with long yields until it exits, post the lines, loop. Keep the turn active. |
 | Neither (other hosts) | Run `AP next <session> --timeout 60` in the foreground, post the lines between calls, loop. |
 
-Keep exactly one `next` per run: start the next one after posting, never
+Keep exactly one `next` per run: start the next one before posting, never
 start a second one beside it, never kill it ("One Watcher" in
 `control.md`). A result "a newer watch took over" needs no action.
+
+### The Last Message Stays
+
+The chat history keeps only the last message of a turn. The hosts fold
+text written between tool calls into the step view, so a line posted
+there disappears when the turn ends. In each wake, do the steps in this
+order:
+
+```
+notice ─► cat the output ─► other tool calls (checks, answers) ─► start AP next
+       ─► last message: the update lines in one text block ─► end the turn
+```
+**Note:** the update lines come last, after every tool call. No tool call
+comes after them, not even a check that the watcher holds the run.
+
+In a host that polls (Codex), the loop keeps the turn active: post the
+lines as their own message, and put them again in the last message of the
+turn.
 
 ### Token Budget
 
@@ -118,7 +136,10 @@ Never rewrite an update line into a sentence. Never shorten it or drop
 its model, effort, `how`, steps or `Plan:`/`Done:` line. The Output
 Language rules do not apply to these lines: they are driver output, like
 an error message. Add no text around the block, except a reply to the
-user or a decision. Do not paraphrase `activity`, add "still working"
+user or a decision. Post the lines also when the same wake runs other
+commands, in the last message ("The Last Message Stays"). The `Stop` hook
+checks this: a line that is not in the last message blocks the end of the
+turn once ("Hooks" in `control.md`). Do not paraphrase `activity`, add "still working"
 lines or post the task list again. A sample run:
 
 ```

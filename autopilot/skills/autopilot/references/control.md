@@ -116,7 +116,15 @@ repository needs attention:
 | Hook | Says or does |
 |---|---|
 | `UserPromptSubmit` | Adds context to the user's message: which run is live with no watcher (or ended unreported), how many updates were missed, and whether this chat started it |
-| `Stop` | Only in the owner chat: blocks ending the turn while its live run has no watcher, or its finished run has no report, and names the command to run |
+| `Stop` | Only in the owner chat: blocks ending the turn while its live run has no watcher, or its finished run has no report, and names the command to run. It also blocks once when update lines that `AP next` gave the chat are not in the last message of the turn, and lists them: write them as the last message |
+
+`AP next` keeps the update lines it gave the chat in `to-post.json` until
+the `Stop` hook compares them with the last message of the turn
+(`last_assistant_message` from the host, else the text after the last tool
+call in the Claude Code transcript). Only that message stays in the chat
+history. Each check clears the
+list, so it never blocks in a loop. When the host gives neither, the check
+passes.
 
 The owner is the chat that started the run or last watched it
 (`CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`). Another chat answers the user

@@ -1,5 +1,5 @@
 {
-  "description": "Keeps the chat that started an autopilot run in charge of it: tells a chat about runs nobody is watching when the user writes, and stops the owner chat from ending its turn without a watcher. Uses the Stop and UserPromptSubmit schema shared by Claude Code and Codex.",
+  "description": "Keeps the chat that started an autopilot run in charge of it: tells a chat about runs nobody is watching when the user writes, and stops the owner chat from ending its turn without a watcher or without posting the update lines it was given. Uses the Stop and UserPromptSubmit schema shared by Claude Code and Codex.",
   "hooks": {
     "UserPromptSubmit": [
       {

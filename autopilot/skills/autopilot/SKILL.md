@@ -4,7 +4,7 @@ description: This skill should be used when the user runs "/autopilot" or "$auto
 argument-hint: "[task description | path to an existing plan file] [-- extra runner flags]"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, Skill, Agent, CronCreate, CronDelete
 metadata:
-  version: "0.10.0"
+  version: "0.10.1"
 ---
 
 # Autopilot

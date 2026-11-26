@@ -35,7 +35,7 @@ the review round again. See `reviews.md` for when the session continues.
 | `limit` (in every `wait` report) | Active episode: `tool`, `pattern`, `message`, `resets` (text), `resets_in_s`, `retries`, `next_retry_in_s`, `waiting_min`, `handled_by` (`ralphex`, `autopilot` or `agent`) |
 | `limit` event | An episode started (once). Wakes the agent. |
 | `limit-retry` event | The runner retried and is still limited. Quiet: does not wake the agent. |
-| `limit-cleared` event | Work resumed; carries the minutes waited. |
+| `limit-cleared` event | Work resumed; carries the minutes waited and the step it resumed on: `section`, `title` (a task), `model`, `how`, and `before` when the router chose another model than before the limit. |
 | `transient` event | A 5xx/529 API error the runner retries as a session timeout. Quiet. |
 | `failed`, category `limit` | The reset is more than 6 h away: the agent decides. |
 
@@ -58,8 +58,16 @@ On the `limit` event, one update:
 ```
 
 While limited, post nothing on `NO NEWS`: the `limit` line already gave
-the reset time, and `limit-cleared` posts "▶ Limit cleared after 47 min;
-work continues."
+the reset time, and `limit-cleared` posts the step, the model and effort it
+resumed on, and who chose them:
+
+```
+▶ Limit cleared after 47 min; work continues on claude review 1: critical/major · claude-sonnet-5-5 (high) (was claude-opus-5-5 (high)) · chosen by agrouter
+```
+
+The limit ends when the router selects a model again or new output comes.
+The router's "routing skipped: ... quota exhausted" lines (also when the
+runner wraps them) belong to the limit: they are not errors and do not end it.
 
 Never call a limited run hung, and never stop or restart it because it is
 quiet: the runner is sleeping on purpose.

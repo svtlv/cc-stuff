@@ -839,7 +839,9 @@ class AutopilotDriver(unittest.TestCase):
         self.assertNotIn('error', [e['kind'] for e in self.state(sid)['events']])
 
     def test_reminder_then_extend_then_never(self):
-        env = dict(self.env, AUTOPILOT_TIMEOUTS='question=4,question.remind=3')
+        # reminder 5 s after the prompt, auto-answer 10 s after it: wide enough windows for
+        # until() to see the prompt before the reminder, and for extend before the deadline
+        env = dict(self.env, AUTOPILOT_TIMEOUTS='question=10,question.remind=5')
         sid = self.drive('plan', '--desc', 'add caching', env=env)['session']
         rep = self.until(sid, 'waiting')
         self.assertEqual(rep['auto_answer'], 'question')
@@ -847,7 +849,7 @@ class AutopilotDriver(unittest.TestCase):
         rep = self.wait(sid, rep['seq'])
         self.assertEqual([e['kind'] for e in rep['new_events']], ['reminder'])
         self.drive('extend', sid, '--never')
-        time.sleep(4)
+        time.sleep(6)  # past the old 10 s deadline
         rep = self.drive('wait', sid, '--timeout', '1', '--since', str(rep['seq']))
         self.assertEqual(rep['status'], 'waiting')
         self.assertIsNone(rep['auto_answer_in_s'])
@@ -1510,6 +1512,76 @@ class PlanRevision(unittest.TestCase):
         d = self.ap('plan-rev', 'diff', 'docs/plans/p2.md')
         self.assertTrue(d['changed'])
         self.assertEqual((d['tasks_before'], d['tasks_after'], d['added']), (1, 2, 3))
+
+
+class PostedUpdates(unittest.TestCase):
+    """The Stop hook holds the owner chat back once when it did not post a `next` line."""
+
+    CODEX_1 = '▶ External review: codex iteration 1 · gpt-6.2-sol (xhigh) · chosen by agrouter'
+    CLAUDE_1 = ('▶ External review: claude evaluating codex findings · claude-sonnet-5-5 (high) · '
+                'chosen by agrouter')
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(tmp.name)
+        self.sdir = self.base / 'state/sessions/20261126-034342-run-c2f2'
+        self.sdir.mkdir(parents=True)
+        autopilot.write_json(self.sdir / 'session.json', {'kind': 'run', 'owner': 'chat-1'})
+        self.transcript = self.base / 'chat.jsonl'
+
+    def chat(self, *texts):
+        """Assistant messages; None is a tool call (its output holds CODEX_1: never counts)."""
+        stamp = time.strftime('%Y-%m-%dT%H:%M:%S.000Z', time.gmtime(time.time() + 1))
+        with open(self.transcript, 'a', encoding='utf-8') as fh:
+            for text in texts:
+                if text is None:
+                    fh.write(json.dumps({'type': 'assistant', 'timestamp': stamp, 'message': {
+                        'content': [{'type': 'tool_use', 'name': 'Bash', 'input': {}}]}}) + '\n')
+                    fh.write(json.dumps({'type': 'user', 'timestamp': stamp, 'message': {
+                        'content': [{'type': 'tool_result', 'content': self.CODEX_1}]}}) + '\n')
+                else:
+                    fh.write(json.dumps({'type': 'assistant', 'timestamp': stamp, 'message': {
+                        'content': [{'type': 'text', 'text': text}]}}) + '\n')
+
+    def stop(self, chat='chat-1', **extra):
+        env = dict(os.environ, AUTOPILOT_STATE_DIR=str(self.base / 'state'))
+        data = {'session_id': chat, 'cwd': str(self.base), 'transcript_path': str(self.transcript),
+                **extra}
+        res = subprocess.run([sys.executable, str(DRIVER), 'hook', 'stop'], env=env,
+                             input=json.dumps(data), capture_output=True, text=True, timeout=30)
+        return json.loads(res.stdout) if res.stdout.strip() else None
+
+    def test_a_line_the_chat_skipped_blocks_the_stop_once(self):
+        autopilot.note_to_post(self.sdir, [self.CODEX_1, self.CLAUDE_1 + '\n   Plan: x'])
+        # CODEX_1 written before a tool call is folded away: only the last message stays
+        self.chat(f'```text\n{self.CODEX_1}\n```', None,
+                  'The watcher holds the run during the external review.',
+                  f'```text\n{self.CLAUDE_1}\n```')
+        self.assertIsNone(self.stop(chat='other-chat'))  # only the owner is held back
+        out = self.stop()
+        self.assertEqual(out['decision'], 'block')
+        self.assertIn(self.CODEX_1, out['reason'])
+        self.assertIn('last message', out['reason'])
+        self.assertNotIn('claude evaluating', out['reason'])
+        self.assertIsNone(self.stop())  # checked once: never a loop
+        self.assertFalse((self.sdir / autopilot.TO_POST).exists())
+
+    def test_posted_lines_and_unknown_chats_pass(self):
+        autopilot.note_to_post(self.sdir, [self.CODEX_1])
+        self.chat('Starting the next watch.', None, f'```text\n{self.CODEX_1}\n```')
+        self.assertIsNone(self.stop())
+        # the host's last_assistant_message is the last message: it wins over the transcript
+        autopilot.note_to_post(self.sdir, [self.CODEX_1])
+        self.assertEqual(self.stop(last_assistant_message='The watcher holds the run.')
+                         ['decision'], 'block')
+        autopilot.note_to_post(self.sdir, [self.CODEX_1])
+        self.assertIsNone(self.stop(last_assistant_message=f'```text\n{self.CODEX_1}\n```'))
+        # neither (another host): fail open
+        self.transcript.unlink()
+        autopilot.note_to_post(self.sdir, [self.CODEX_1])
+        self.assertIsNone(self.stop())
+        self.assertTrue((self.sdir / autopilot.TO_POST).exists())
 
 
 class StepsSummary(unittest.TestCase):
@@ -2285,6 +2357,43 @@ class SupervisorUnits(unittest.TestCase):
         self.addCleanup(sup.log.close)
         return sup, repo
 
+    def test_report_takes_every_model_from_the_agrouter_log(self):
+        sup, repo = self.run_supervisor('claude_command = agrouter\n')
+        start = time.time() - 3600
+        meta = {'repo': str(repo), 'created': start, 'kind': 'run'}
+        clock = lambda s: time.strftime('%H:%M:%S', time.localtime(start + s))
+        utc = lambda s: time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(start + s))
+        events = [{'t': clock(0), 'kind': 'section', 'section': 'task iteration 1',
+                   'phase': 'implementing tasks'},
+                  {'t': clock(2), 'kind': 'task-start', 'title': 'Task 1: one'},
+                  {'t': clock(600), 'kind': 'section', 'section': 'claude review 1',
+                   'phase': 'code review'},
+                  {'t': clock(1200), 'kind': 'section', 'section': 'codex iteration 1',
+                   'phase': 'external review'}]
+        (sup.sdir / 'events.jsonl').write_text(''.join(json.dumps(e) + '\n' for e in events))
+        sel = lambda cli, model, effort: json.dumps({
+            'cli': cli, 'model': model, 'effort': effort, 'effective': {
+                'model': {'value': model, 'source': 'router'},
+                'effort': {'value': effort, 'source': 'router'}}})
+        log = repo / '.agrouter/logs/agrouter.log'
+        log.parent.mkdir(parents=True)
+        log.write_text(''.join(f'{utc(s)} pid={s + 10} agrouter: selection: {j}\n' for s, j in (
+            (-600, sel('claude', 'claude-haiku-5-5', 'low')),      # an earlier session
+            (1, sel('claude', 'claude-opus-5-5', 'xhigh')),
+            (601, sel('claude', 'claude-opus-5-5', 'high')),
+            (900, sel('claude', 'claude-sonnet-5-5', 'high')),     # the retry after a limit
+            (1201, sel('codex', 'gpt-6.2-sol', 'xhigh')))) + 'agrouter: other line\n')
+        out = autopilot.router_selections(sup.sdir, meta, {'ended': start + 1800})
+        self.assertTrue(out['found'])
+        rows = [(x['section'], x['task'], x['model'], x['how']) for x in out['selections']]
+        self.assertEqual(rows, [
+            ('task iteration 1', 'Task 1: one', 'claude-opus-5-5 (xhigh)', 'chosen by agrouter'),
+            ('claude review 1', None, 'claude-opus-5-5 (high)', 'chosen by agrouter'),
+            ('claude review 1', None, 'claude-sonnet-5-5 (high)', 'chosen by agrouter'),
+            ('codex iteration 1', None, 'gpt-6.2-sol (xhigh)', 'chosen by agrouter')])
+        log.unlink()
+        self.assertEqual(autopilot.router_selections(sup.sdir, meta, {})['found'], False)
+
     def test_every_step_says_its_model_and_who_chose_it(self):
         sup, repo = self.run_supervisor(
             'claude_command = agrouter\nreview_model = :high\ncodex_command = '
@@ -2334,6 +2443,48 @@ class SupervisorUnits(unittest.TestCase):
         self.assertIn('set by --task-model=opus:xhigh on the run', autopilot.event_line(task))
         self.assertEqual([s['how'] for s in sup.state['steps']][:2],
                          ['set by --task-model=opus:xhigh on the run', phases[0]['how']])
+
+    def test_limit_restore_reports_the_model_the_work_resumed_on(self):
+        # the lines of a real run: a review hits the quota, the router refuses to start the CLI
+        # on every retry (its message wrapped at the terminal width), then routes another model
+        sup, _ = self.run_supervisor('claude_command = agrouter\n')
+        sup.scan_line('--- claude review 1: critical/major ---')
+        sup.scan_line('agrouter: selection:')
+        sup.scan_line('{"cli":"claude","model":"claude-opus-5-5","effort":"high","effective":'
+                      '{"model":{"value":"claude-opus-5-5","source":"router"},'
+                      '"effort":{"value":"high","source":"router"}}}')
+        sup.scan_line('Reviewing the diff')
+        sup.scan_line('rate limit detected: "API Error: 429" in claude output, waiting 15m0s before retry...')
+        for _ in range(2):
+            sup.scan_line('agrouter: routing skipped: claude subscription quota')
+            sup.scan_line('exhausted; routing provider was not called; child CLI was')
+            sup.scan_line('not started')
+            sup.scan_line("agrouter: You've hit your limit; five-hour subscription")
+            sup.scan_line('quota exhausted; resets at 2026-11-26T15:30:00Z')
+            sup.scan_line('rate limit detected: "You\'ve hit your limit" in claude output, '
+                          'waiting 15m0s before retry...')
+        self.assertEqual(sup.state['limit']['resets'], '2026-11-26T15:30:00Z')
+        sup.scan_line('agrouter: selection:')
+        sup.scan_line('{"cli":"claude","model":"claude-sonnet-5-5","effort":"high","effective":'
+                      '{"model":{"value":"claude-sonnet-5-5","source":"router"},'
+                      '"effort":{"value":"high","source":"router"}}}')
+        sup.scan_line('The earlier agents hit a rate limit before they returned.')
+        kinds = [e['kind'] for e in sup.state['events']]
+        self.assertEqual(kinds.count('limit'), 1)
+        self.assertEqual(kinds.count('limit-retry'), 2)
+        self.assertEqual(kinds.count('limit-cleared'), 1)
+        self.assertNotIn('error', kinds)
+        self.assertIsNone(sup.state['limit'])
+        cleared = next(e for e in sup.state['events'] if e['kind'] == 'limit-cleared')
+        self.assertEqual(cleared['model']['model'], 'claude-sonnet-5-5')
+        self.assertEqual(cleared['how'], 'chosen by agrouter')
+        self.assertEqual(cleared['before'], 'claude-opus-5-5 (high)')
+        self.assertEqual(autopilot.event_line(cleared),
+                         '▶ Limit cleared after 0 min; work continues on claude review 1: '
+                         'critical/major · claude-sonnet-5-5 (high) (was claude-opus-5-5 (high)) · '
+                         'chosen by agrouter')
+        self.assertEqual(sup.state['steps'][-1]['model'], 'claude-sonnet-5-5 (high)')
+        self.assertEqual(sup.state['steps'][-1]['after'], 'rate limit')
 
     def test_agrouter_log_is_the_model_source_for_every_step(self):
         sup, repo = self.run_supervisor('claude_command = agrouter\n')

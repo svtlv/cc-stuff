@@ -75,6 +75,9 @@ STRONG_LIMIT_RE = re.compile(r"(?i)(hit your (?:usage |session |weekly |org's mo
                              r'spend )?limit|quota (?:exhausted|exceeded)|insufficient_quota|'
                              r'API Error: 429|429 Too Many Requests|Selected model is at capacity)')
 DIAG_PREFIX_RE = re.compile(r'(?i)^(agrouter:|ERROR:|error: detected)')
+# the router refusing to start the CLI while its quota is out ("routing skipped: claude
+# subscription quota exhausted; ..."), often wrapped after "quota"
+ROUTER_SKIP_RE = re.compile(r'(?i)^agrouter: routing skipped: .*\b(quota|limit)')
 # the runner's hint after a pattern error; neither a limit line nor new work
 HELP_LINE_RE = re.compile(r"^run '.+' for more information")
 # what is actually running: the router's selection line, or the codex executor's banner
@@ -814,6 +817,18 @@ def router_config_paths(repo):
     if repo:
         paths.append(Path(repo) / '.agrouter/config')
     return paths
+
+
+def router_log_path(repo):
+    """agrouter's console log for a repo (<log_dir>/agrouter.log), or None without log_dir."""
+    if not repo:
+        return None
+    repo = Path(repo)
+    log_dir = merged(router_config_paths(repo)).get('agrouter', {}).get('log_dir')
+    if not log_dir:
+        return None
+    path = Path(log_dir).expanduser()
+    return (path if path.is_absolute() else repo / path) / 'agrouter.log'
 
 
 def cli_config_paths(repo):
@@ -2267,6 +2282,7 @@ class Supervisor:
         self.findings = None    # plan review findings being read, None outside that block
         self.state.setdefault('task_log', {})
         self.router_mark = None  # (agrouter.log path, size) when a codex step started
+        self.limit_tail = 0     # wrapped lines a limit diagnostic may still have
         try:
             self.setup = model_setup(self.meta['repo'], self.meta.get('cli_args'),
                                      self.meta.get('executor'))
@@ -2549,12 +2565,7 @@ class Supervisor:
 
     def router_log(self):
         """agrouter's console log for this repo (<log_dir>/agrouter.log), or None."""
-        repo = Path(self.meta['repo'])
-        log_dir = merged(router_config_paths(repo)).get('agrouter', {}).get('log_dir')
-        if not log_dir:
-            return None
-        path = Path(log_dir).expanduser()
-        return (path if path.is_absolute() else repo / path) / 'agrouter.log'
+        return router_log_path(self.meta['repo'])
 
     def router_log_mark(self):
         path = self.router_log()
@@ -2611,34 +2622,10 @@ class Supervisor:
         return found
 
     def use_selection(self, sel):
-        model = {k: sel.get(k) for k in ('cli', 'model', 'effort')}
         if self.step:
             self.step['selected'] = True  # an agrouter selection line: the router ran this step
-        # a value agrouter left to the CLI: record what the CLI really runs with, and why
-        effective = sel.get('effective') or {}
-        defaults, sources = {}, {}
-        for field in ('model', 'effort'):
-            eff = effective.get(field)
-            if isinstance(eff, dict) and eff.get('source'):
-                # router, native, verified_child_default or child_default_unknown (agrouter v1.0.0+
-                # names it for every field; older ones only for a value left to the CLI)
-                sources[field] = eff['source']
-            if model[field] is None and eff:
-                model[field] = eff.get('value')
-                defaults[field] = {'value': eff.get('value'), 'source': eff.get('source'),
-                                   'why': (eff.get('reason') or {}).get('code')}
-        reason = sel.get('reason') or {}
+        model = selection_model(sel)
         fallback = sel.get('fallback')
-        if fallback or reason:
-            model['fallback'] = {'fields': (fallback or {}).get('fields') or list(defaults),
-                                 'code': reason.get('code'), 'stage': reason.get('stage'),
-                                 'message': reason.get('message'), 'defaults': defaults}
-        elif defaults:
-            model['defaults'] = defaults  # routing worked and left these to the CLI on purpose
-        if sources:
-            model['sources'] = sources
-        if (sel.get('readiness') or {}).get('excluded'):
-            model['excluded'] = sel['readiness']['excluded']
         self.state['model'] = model
         self.count_model(model)
         if model.get('fallback'):
@@ -2660,6 +2647,8 @@ class Supervisor:
         if self.step:
             self.step['model'] = dict(self.state['model'])
             self.announce_step()
+        if self.state.get('limit'):
+            self.end_limit()  # the router chose a model again: the retry runs, on this model
 
     def count_model(self, model):
         """Tally calls per cli/model/effort for the final report."""
@@ -2670,15 +2659,22 @@ class Supervisor:
         used[key] = used.get(key, 0) + 1
         self.save()
 
+    def new_limit(self):
+        """A new rate-limit episode, with the model the step ran on when it started."""
+        step = self.step or {}
+        return {'since': now(), 'retries': 0,
+                'before': model_label(step['model']) if step.get('model') else None}
+
     def scan_limit(self, line):
         """Track a rate-limit episode; True when the line belongs to one."""
         limit = self.state.get('limit')
         m = LIMIT_WAIT_RE.search(line)
         if m:
+            self.limit_tail = 0
             wait_s = go_duration(m.group(3)) or 0
             # the router's quota line may have opened the episode: the first wait still counts
             first = not limit or not limit.get('retries')
-            limit = limit or {'since': now(), 'retries': 0}
+            limit = limit or self.new_limit()
             limit.update({'pattern': m.group(1), 'tool': m.group(2), 'wait_s': wait_s,
                           'next_retry_at': now() + wait_s, 'handled_by': 'ralphex'})
             limit['retries'] += 1
@@ -2691,29 +2687,80 @@ class Supervisor:
                        pattern=limit['pattern'], wait_s=wait_s, retries=limit['retries'],
                        resets=limit.get('resets'))
             return True
-        starts = STRONG_LIMIT_RE.search(line) or (
-            DIAG_PREFIX_RE.search(line) and LIMIT_LINE_RE.search(line))
-        if starts or (limit and LIMIT_LINE_RE.search(line)):
+        diag = DIAG_PREFIX_RE.search(line)
+        # the runner wraps a diagnostic at the terminal width: "...subscription quota" /
+        # "exhausted; routing provider was not called; child CLI was" / "not started"
+        tail = bool(limit and self.limit_tail and line and not diag)
+        self.limit_tail = self.limit_tail - 1 if tail else 0
+        starts = STRONG_LIMIT_RE.search(line) or ROUTER_SKIP_RE.search(line) or (
+            diag and LIMIT_LINE_RE.search(line))
+        if starts or tail or (limit and LIMIT_LINE_RE.search(line)):
             epoch, text = parse_reset(line)
-            limit = limit or {'since': now(), 'retries': 0}
-            limit['message'] = line[:200]
+            limit = limit or self.new_limit()
+            limit['message'] = (f"{limit.get('message', '')} {line}" if tail else line)[:200]
             if text:
                 limit.update({'resets': text, 'resets_at': epoch})
             self.state['limit'] = limit
+            if diag:
+                self.limit_tail = 3
             self.save()
             return True
         if HELP_LINE_RE.search(line):
             return True
         if limit and line:
-            self.state['limit'] = None
-            if not limit.get('retries'):
-                return False  # a limit message without any wait: nothing to report
-            minutes = round((now() - limit['since']) / 60)
-            log_decision(self.sdir, kind='recovery', by='ralphex',
-                         text=f'rate limit cleared after {minutes} min, work resumed',
-                         reason=limit.get('pattern'))
-            self.event('limit-cleared', minutes=minutes, retries=limit.get('retries', 0))
+            return self.end_limit()
         return False
+
+    def end_limit(self):
+        """The episode is over: report how long it took and the model the work resumed on.
+
+        False, so the line that ended it is still scanned as normal output."""
+        limit = self.state.get('limit') or {}
+        self.state['limit'] = None
+        self.limit_tail = 0
+        if not limit.get('retries'):
+            return False  # a limit message without any wait: nothing to report
+        minutes = round((now() - limit['since']) / 60)
+        step = self.step or {}
+        model = step.get('model')
+        how = model_how(model, self.setup, step['phase'], step['section'],
+                        step.get('selected')) if step else None
+        label = model_label(model, how) if step else None
+        on = ''
+        if label:
+            on = f' on {label}' + (f' ({how})' if how else '')
+        before = limit.get('before')
+        changed = bool(label and before and model and before != model_label(model))
+        log_decision(self.sdir, kind='recovery', by='ralphex',
+                     text=f'rate limit cleared after {minutes} min, work resumed{on}'
+                          + (f' (was {before})' if changed else ''),
+                     reason=limit.get('pattern'))
+        extra = {}
+        if step:
+            title = (self.state.get('tasks') or {}).get('current_task') \
+                if step['phase'] == 'implementing tasks' else None
+            extra = {'section': step['section'], 'phase': step['phase'], 'model': model,
+                     'how': how, **({'title': title} if title else {}),
+                     **({'before': before} if changed else {})}
+            self.record_resumed(step, model, how)
+        self.event('limit-cleared', minutes=minutes, retries=limit.get('retries', 0), **extra)
+        return False
+
+    def record_resumed(self, step, model, how):
+        """Keep the model a step resumed on after a limit in the report's steps and task log."""
+        if not model:
+            return
+        steps = self.state.setdefault('steps', [])
+        steps.append({'t': time.strftime('%H:%M:%S'), 'section': step['section'],
+                      'phase': step['phase'], 'model': model_label(model, how), 'how': how,
+                      'after': 'rate limit'})
+        self.state['steps'] = steps[-300:]
+        if step['phase'] != 'implementing tasks':
+            return
+        title = (self.state.get('tasks') or {}).get('current_task')
+        entry = self.state['task_log'].get(title) if title else None
+        if entry is not None and model_label(model) not in entry['models']:
+            entry['models'].append(model_label(model))
 
     def send(self, text):
         try:
@@ -3752,6 +3799,17 @@ def cmd_hook(args):
     except ValueError:
         data = {}
     chat = data.get('session_id')
+    if args.event == 'stop' and not data.get('stop_hook_active'):
+        missing = unposted_updates(data, chat)
+        if missing:
+            body = '\n'.join(line for _, lines in missing for line in lines)
+            print(json.dumps({'decision': 'block', 'reason': (
+                f"autopilot: `next` gave this chat update lines for {', '.join(s for s, _ in missing)} "
+                'that are not in the last message of the turn, so they are not in the chat history. '
+                'Write them now as the last message, as is, in one `text` code block, with '
+                'their model, effort and how, and no tool call after it (monitoring.md, '
+                '"Update Formats"):\n' + body)}))
+            return
     runs = runs_needing_attention(data.get('cwd') or os.getcwd())
     if not runs:
         return
@@ -3856,6 +3914,39 @@ def step_pins(setup, phase, section):
         pins['model'] = pins['model'] or default('codex_model')
         pins['effort'] = pins['effort'] or default('codex_reasoning_effort')
     return pins
+
+
+def selection_model(sel):
+    """An agrouter selection as the step model: cli, model, effort, and who set each field.
+
+    A value agrouter left to the CLI is recorded with what the CLI really runs with, and why.
+    """
+    model = {k: sel.get(k) for k in ('cli', 'model', 'effort')}
+    effective = sel.get('effective') or {}
+    defaults, sources = {}, {}
+    for field in ('model', 'effort'):
+        eff = effective.get(field)
+        if isinstance(eff, dict) and eff.get('source'):
+            # router, native, verified_child_default or child_default_unknown (agrouter v1.0.0+
+            # names it for every field; older ones only for a value left to the CLI)
+            sources[field] = eff['source']
+        if model[field] is None and eff:
+            model[field] = eff.get('value')
+            defaults[field] = {'value': eff.get('value'), 'source': eff.get('source'),
+                               'why': (eff.get('reason') or {}).get('code')}
+    reason = sel.get('reason') or {}
+    fallback = sel.get('fallback')
+    if fallback or reason:
+        model['fallback'] = {'fields': (fallback or {}).get('fields') or list(defaults),
+                             'code': reason.get('code'), 'stage': reason.get('stage'),
+                             'message': reason.get('message'), 'defaults': defaults}
+    elif defaults:
+        model['defaults'] = defaults  # routing worked and left these to the CLI on purpose
+    if sources:
+        model['sources'] = sources
+    if (sel.get('readiness') or {}).get('excluded'):
+        model['excluded'] = sel['readiness']['excluded']
+    return model
 
 
 def model_how(model, setup, phase, section, selected=False):
@@ -4036,7 +4127,13 @@ def event_line(e):
         return (f"⏸ Usage limit ({e.get('tool') or 'model'}): {e.get('pattern')}{resets}{wait}. "
                 'Finished tasks are kept.')
     if k == 'limit-cleared':
-        return f"▶ Limit cleared after {e.get('minutes')} min; work continues."
+        line = f"▶ Limit cleared after {e.get('minutes')} min; work continues"
+        if 'model' not in e:
+            return line + '.'
+        was = f" (was {e['before']})" if e.get('before') else ''
+        return ' · '.join(x for x in (
+            f"{line} on {e.get('title') or e.get('section') or 'this step'}",
+            model_label(e.get('model'), e.get('how')) + was, e.get('how')) if x)
     if k == 'auto-answered':
         return f"⏱ No reply: answered \"{e.get('summary')}\". {e.get('reason') or ''}".strip()
     if k == 'review-skipped':
@@ -4248,7 +4345,103 @@ def cmd_next(args):
     if args.json:
         emit(out)
         return
+    note_to_post(sdir, out.get('updates'))
     print(next_text(out, sdir))
+
+
+TO_POST = 'to-post.json'  # update lines `next` gave the chat, until the Stop hook checks them
+
+
+def note_to_post(sdir, updates):
+    """Remember the update lines the chat must post; the Stop hook checks the chat has them."""
+    lines = [u.split('\n')[0] for u in updates or [] if u]
+    if not lines:
+        return
+    old = read_json(sdir / TO_POST, {}) or {}
+    write_json(sdir / TO_POST, {'t': old.get('t') or now(),
+                                'lines': ((old.get('lines') or []) + lines)[-40:]})
+
+
+def squash(text):
+    return ' '.join(str(text or '').split())
+
+
+def iso_epoch(text):
+    """'2026-11-26T15:31:46.501Z' as an epoch, or None."""
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(str(text).replace('Z', '+00:00')).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def last_message(data, since):
+    """The chat's last message of this turn, whitespace squashed; None when unknown.
+
+    Only the last message stays in the chat history: the hosts fold text written between
+    tool calls into the step view. Claude Code and Codex give it as last_assistant_message;
+    else it is the text after the last tool call in the Claude Code transcript (JSONL, tool
+    output in "user" entries, so only what the agent wrote counts).
+    """
+    if data.get('last_assistant_message') is not None:
+        return squash(data['last_assistant_message'])
+    path = data.get('transcript_path')
+    if not path:
+        return None
+    try:
+        with open(path, 'rb') as fh:
+            fh.seek(max(0, os.path.getsize(path) - 4 * 1024 * 1024))
+            raw = fh.read().decode('utf-8', 'replace')
+    except OSError:
+        return None
+    texts, known = [], False
+    for line in raw.splitlines():
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(e, dict) or e.get('type') != 'assistant':
+            continue
+        known = True
+        at = iso_epoch(e.get('timestamp'))
+        if at is not None and at < since - 5:
+            continue
+        content = (e.get('message') or {}).get('content')
+        for c in [{'type': 'text', 'text': content}] if isinstance(content, str) else \
+                content if isinstance(content, list) else []:
+            if not isinstance(c, dict):
+                continue
+            if c.get('type') == 'tool_use':
+                texts = []  # text before a tool call is folded away
+            elif c.get('type') == 'text':
+                texts.append(c.get('text') or '')
+    return squash('\n'.join(texts)) if known else None
+
+
+def unposted_updates(data, chat):
+    """[(session, lines)] that `next` gave this chat and its last message does not hold.
+
+    Each check clears the list, so a missing line blocks the stop once, never in a loop."""
+    root = state_root() / 'sessions'
+    if not chat or not root.exists():
+        return []
+    out = []
+    for d in sorted(root.iterdir(), reverse=True)[:40]:
+        pending = read_json(d / TO_POST, {}) or {}
+        if not pending.get('lines') or \
+                (read_json(d / 'session.json', {}) or {}).get('owner') != chat:
+            continue
+        text = last_message(data, pending.get('t') or 0)
+        if text is None:
+            continue  # this host gives no way to see the chat: fail open
+        try:
+            (d / TO_POST).unlink()
+        except OSError:
+            pass
+        missing = [line for line in pending['lines'] if squash(line) not in text]
+        if missing:
+            out.append((d.name, missing))
+    return out
 
 
 def one_line(text):
@@ -4951,6 +5144,82 @@ def cmd_publish(args):
     return finish(pr={'url': link[-1], 'created': True, 'draft': draft, 'base': base})
 
 
+ROUTER_LOG_LINE_RE = re.compile(r'^(\S+) pid=(\d+) agrouter: selection: (\{.*\})\s*$')
+
+
+def session_steps(sdir, meta):
+    """[(epoch, section, phase, task title or None)] of a session, from its event timeline.
+
+    Events carry only the clock time: the date comes from the session start, plus a day each
+    time the clock goes back."""
+    path = sdir / 'events.jsonl'
+    try:
+        lines = path.read_text(encoding='utf-8').splitlines()
+    except OSError:
+        return []
+    created = meta.get('created') or 0
+    day = time.mktime(time.localtime(created)[:3] + (0, 0, 0, 0, 0, -1))
+    steps, last = [], None
+    for line in lines:
+        try:
+            e = json.loads(line)
+            h, m, sec = (int(x) for x in e['t'].split(':'))
+        except (ValueError, KeyError, AttributeError):
+            continue
+        clock = h * 3600 + m * 60 + sec
+        if last is not None and clock < last:
+            day += 86400
+        last = clock
+        if e.get('kind') == 'section':
+            steps.append([day + clock, e.get('section'), e.get('phase'), None])
+        elif e.get('kind') == 'task-start' and steps and steps[-1][3] is None:
+            steps[-1][3] = e.get('title')
+    return [tuple(x) for x in steps]
+
+
+def router_selections(sdir, meta, st):
+    """Every model choice agrouter logged during a session, matched to the step it ran in.
+
+    agrouter writes each selection to <log_dir>/agrouter.log with a full UTC time, also for
+    Codex and for a retry after a rate limit. This is the report's source for models,
+    efforts and who chose them. {'log', 'found', 'selections': [...]}"""
+    path = router_log_path(meta.get('repo'))
+    out = {'log': str(path) if path else None, 'found': False, 'selections': []}
+    if not path or not path.exists():
+        return out
+    out['found'] = True
+    start = (meta.get('created') or 0) - 5
+    end = (st.get('ended') or now()) + 5
+    steps = session_steps(sdir, meta)
+    try:
+        setup = model_setup(meta['repo'], meta.get('cli_args'), meta.get('executor'))
+    except Exception:  # never let the source label stop a report
+        setup = None
+    try:
+        lines = path.read_text(encoding='utf-8', errors='replace').splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        m = ROUTER_LOG_LINE_RE.match(line)
+        at = iso_epoch(m.group(1)) if m else None
+        if at is None or not start <= at <= end:
+            continue
+        try:
+            sel = json.loads(m.group(3))
+        except ValueError:
+            continue
+        step = next((x for x in reversed(steps) if x[0] <= at + 1), None)
+        section, phase, title = (step[1], step[2], step[3]) if step else (None, None, None)
+        model = selection_model(sel)
+        how = model_how(model, setup, phase, section, True)
+        out['selections'].append({
+            't': time.strftime('%H:%M:%S', time.localtime(at)), 'section': section,
+            'phase': phase, 'task': title, 'cli': model.get('cli'),
+            'model': model_label(model, how), 'how': how, 'pid': int(m.group(2)),
+            **({'fallback': model['fallback']} if model.get('fallback') else {})})
+    return out
+
+
 def cmd_report(args):
     """Everything that happened in a flow (or one session), for the final report."""
     root = state_root() / 'sessions'
@@ -4979,6 +5248,7 @@ def cmd_report(args):
             'executor': meta.get('executor'), 'models_used': st.get('models_used', {}),
             'task_log': st.get('task_log', {}), 'steps': st.get('steps', []),
             'router_fallbacks': st.get('router_fallbacks', []),
+            'router_log': router_selections(d, meta, st),
             'restarts': st.get('restarts', []), 'last_error': st.get('last_error'),
             'errors': st.get('errors', []), 'phases': [
                 e['section'] for e in st.get('events', []) if e['kind'] == 'section'],

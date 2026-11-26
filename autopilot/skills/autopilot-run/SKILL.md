@@ -4,7 +4,7 @@ description: This skill should be used when the user runs "/autopilot-run" or "$
 argument-hint: "<plan file> [-- extra runner flags such as --tasks-only]"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, Agent, CronCreate, CronDelete
 metadata:
-  version: "0.10.0"
+  version: "0.10.1"
 ---
 
 # Autopilot Run
@@ -119,8 +119,9 @@ every task start and finish, review, commit and problem.
 
 Follow `monitoring.md`: loop on `AP next <session>`, in the way the host
 supports (`hosts.md`; Claude Code: background, Bash timeout 7200000 ms).
-Post its update lines as is, in a `text` code block ("Update Formats" in
-`monitoring.md`). Never rewrite them into sentences: they carry the model,
+Post its update lines as is, in a `text` code block, as the last message of
+the turn with no tool call after it ("Update Formats" and "The Last Message
+Stays" in `monitoring.md`). Never rewrite them into sentences: they carry the model,
 the effort and the `Plan:` line. The table says what to add or do on top.
 
 | Report | Response |
