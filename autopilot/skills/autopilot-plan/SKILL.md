@@ -4,7 +4,7 @@ description: This skill should be used when the user runs "/autopilot-plan" or "
 argument-hint: "[task description | --redesign <file> | --review <file>] [-- extra runner flags]"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, Agent
 metadata:
-  version: "0.10.0"
+  version: "1.1.1"
 ---
 
 # Autopilot Plan
